@@ -17,6 +17,7 @@ Current pages:
 - `/`
 - `/dashboard`
 - `/accounting`
+- `/accounting/review`
 - `/ai`
 - `/admin`
 
