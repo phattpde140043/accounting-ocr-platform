@@ -141,6 +141,24 @@ organized by the correct client relationship.
 - Read latency target: P95 < 300ms for normal tenant workloads.
 - Write latency target: P95 < 700ms excluding database cold starts.
 
+### Business KPI
+
+- Client-company lookup success rate > 99%.
+- Duplicate client setup incidents < 1% of new client records.
+- Average client-company setup time < 2 minutes.
+- Client metadata correction rate decreases quarter over quarter.
+
+### Key Risks And Mitigations
+
+- Risk: Duplicate or conflicting client identity.
+  Mitigation: tenant-scoped tax-code uniqueness and future review workflow for
+  client merges.
+- Risk: Cross-tenant data exposure.
+  Mitigation: backend-resolved organization context and repository filtering.
+- Risk: Unbounded client lists at scale.
+  Mitigation: add explicit pagination and indexed lookup filters before
+  production scale.
+
 ### Architecture Ownership
 
 - Backend owner: `app.domains.accounting.client_company_service`.
@@ -187,6 +205,25 @@ period, type and category metadata.
 - Upload reading must remain chunked and memory-aware.
 - Storage provider must be replaceable without changing accounting services.
 - Upload rejection should fail before any accounting document row is created.
+
+### Business KPI
+
+- Upload success rate > 99% for supported file types.
+- Duplicate upload prevention rate tracked monthly.
+- Average successful upload processing time < 5 seconds for files within limit.
+- Invalid upload rejection accuracy > 99%.
+
+### Key Risks And Mitigations
+
+- Risk: Malware or malicious document upload.
+  Mitigation: MIME, extension and signature validation plus antivirus scanning
+  boundary for production.
+- Risk: Oversized file or resource exhaustion attack.
+  Mitigation: streaming size guard and configured max upload size.
+- Risk: Corrupted PDF or image input.
+  Mitigation: file signature validation and controlled rejection codes.
+- Risk: Duplicate OCR cost from repeated uploads.
+  Mitigation: content hash duplicate detection before OCR.
 
 ### Architecture Ownership
 
@@ -236,6 +273,27 @@ without changing review and export workflows.
 - Future durable worker implementation must support retries and idempotent
   claiming.
 - External provider timeout/failure must not leave invalid lifecycle state.
+
+### Business KPI
+
+- OCR automation rate > 80% after review workflow stabilization.
+- Average OCR processing time < 30 seconds for normal documents.
+- OCR success rate > 99%.
+- OCR retry rate < 5%.
+- Provider-related incident recovery time < 1 business hour.
+
+### Key Risks And Mitigations
+
+- Risk: OCR provider outage.
+  Mitigation: provider registry, fail-closed errors, retry policy and future
+  multi-provider routing.
+- Risk: OCR accuracy degradation.
+  Mitigation: confidence scoring, human review queue and correction audit.
+- Risk: Vendor lock-in.
+  Mitigation: provider protocol and registry boundary.
+- Risk: Duplicate OCR processing cost.
+  Mitigation: duplicate detection, idempotency policy and future OCR result
+  caching.
 
 ### Architecture Ownership
 
@@ -288,6 +346,25 @@ fields, correct values and approve OCR results.
 - Target queue read latency: P95 < 500ms for normal tenant workloads.
 - Future correction history should support pagination.
 
+### Business KPI
+
+- Manual review workload reduced by 70% versus fully manual processing.
+- Average review time per document < 2 minutes.
+- Reviewer backlog < 1 business day.
+- Review SLA breach rate < 5%.
+- Field correction audit coverage = 100% for manual edits.
+
+### Key Risks And Mitigations
+
+- Risk: Review backlog growth.
+  Mitigation: queue filters, dashboard metrics and SLA alert queue.
+- Risk: Incorrect manual correction.
+  Mitigation: field-level audit and future correction history.
+- Risk: Approval of incomplete OCR data.
+  Mitigation: backend approval validation and lifecycle policy.
+- Risk: Reviewer sees cross-tenant result.
+  Mitigation: tenant-scoped repository access for results and fields.
+
 ### Architecture Ownership
 
 - Backend owner: `AccountingOcrService`, `AccountingDocumentRepository`.
@@ -338,6 +415,25 @@ reformatting.
 - Export generation should avoid N+1 document fetches before production scale.
 - Download should become a file response or expiring object-storage reference.
 
+### Business KPI
+
+- Export success rate > 99.5%.
+- Export generation time < 1 minute for 1,000 documents after batch query
+  optimization.
+- Export format defect rate < 0.5%.
+- Duplicate export incident rate < 1%.
+
+### Key Risks And Mitigations
+
+- Risk: Wrong accounting format.
+  Mitigation: serializer isolation, template allowlist and contract tests.
+- Risk: Spreadsheet formula injection.
+  Mitigation: CSV cell escaping.
+- Risk: Duplicate export.
+  Mitigation: export batch identity, audit trail and future idempotency keys.
+- Risk: Large export timeout.
+  Mitigation: move large exports to background jobs and stored artifacts.
+
 ### Architecture Ownership
 
 - Backend owner: `AccountingExportService`.
@@ -380,6 +476,22 @@ review workload, export status and audit activity.
 - Dashboard target load time: < 1s for normal tenant workloads.
 - Aggregate SQL queries should be used instead of row-by-row processing.
 - Dashboard endpoints must avoid unbounded list loading.
+
+### Business KPI
+
+- Dashboard availability > 99.9% during business hours.
+- Operational KPI freshness < 5 minutes for normal workflows.
+- OCR/review backlog visibility coverage = 100% for active tenant documents.
+- Admin decision latency reduced through summary metrics.
+
+### Key Risks And Mitigations
+
+- Risk: Slow dashboard due to row-by-row aggregation.
+  Mitigation: aggregate SQL and bounded query contracts.
+- Risk: Sensitive data leakage through metrics.
+  Mitigation: role-based visibility and aggregate-only payloads.
+- Risk: Misleading stale metrics.
+  Mitigation: timestamped metrics and future refresh indicators.
 
 ### Architecture Ownership
 
@@ -428,6 +540,23 @@ traceable.
 - Production authentication must fail closed without a valid bearer token.
 - Secret and JWT configuration must be environment-managed.
 
+### Business KPI
+
+- 100% privileged action audit coverage.
+- Unauthorized admin access attempts blocked = 100%.
+- User provisioning time < 5 minutes.
+- Audit retrieval time P95 < 700ms after pagination/index hardening.
+
+### Key Risks And Mitigations
+
+- Risk: Privilege escalation.
+  Mitigation: RBAC, least privilege and permission tests.
+- Risk: Demo auth accidentally enabled in production.
+  Mitigation: environment-gated auth provider selection and fail-closed
+  production mode.
+- Risk: Audit log growth slows admin views.
+  Mitigation: pagination, indexes and retention policy.
+
 ### Architecture Ownership
 
 - Backend owner: `app.domains.platform`.
@@ -474,13 +603,156 @@ main intake pipeline.
 - Browser extension package requires separate security review before release.
 - Region OCR should reuse OCR provider boundaries where practical.
 
+### Business KPI
+
+- Region OCR completion time < 10 seconds for bounded selections.
+- Region OCR user task completion rate > 95% after UX validation.
+- Extension-origin OCR errors < 2% of region OCR requests.
+
+### Key Risks And Mitigations
+
+- Risk: Browser extension captures unintended sensitive content.
+  Mitigation: explicit user selection, bounded region payloads and extension
+  security review.
+- Risk: Region OCR bypasses normal document governance.
+  Mitigation: require tenant-scoped document context and RBAC.
+- Risk: Large region batches cause provider cost spikes.
+  Mitigation: per-request region limits and provider cost controls.
+
 ### Architecture Ownership
 
 - Backend owner: `RegionOcrService`.
 - API owner: `POST /api/v1/accounting/documents/{document_id}/region-ocr`.
 - Extension owner: `extension/chrome`.
 
-## 5. Bounded Contexts
+## 5. Business Capability Matrix
+
+| Capability | Primary KPI | Primary Risk | Mitigation | Owner |
+| --- | --- | --- | --- | --- |
+| Client Company Management | Duplicate setup incidents < 1% | Conflicting client identity | Tenant-scoped uniqueness and merge review | Accounting domain |
+| Document Intake | Upload success rate > 99% | Malicious or oversized upload | Validation, size limits and storage boundary | Accounting + Shared domains |
+| OCR Processing | Automation rate > 80% | Provider failure or accuracy drop | Provider registry, retry policy and review queue | Accounting domain |
+| Review Workflow | Review SLA < 4 business hours | Backlog growth | Queue filters, dashboard metrics and SLA alerting | Accounting + Dashboard domains |
+| Export | Export success rate > 99.5% | Template or formula-injection errors | Serializer isolation, allowlist and CSV escaping | Accounting domain |
+| Administration | 100% privileged actions audited | Privilege escalation | RBAC, least privilege and audit trail | Platform domain |
+| Dashboard | Dashboard load < 1s | Slow aggregate queries | Aggregate SQL and bounded endpoints | Dashboard domain |
+| Region OCR | Region OCR < 10s | Sensitive region capture | Explicit selection, RBAC and extension review | Accounting + Extension |
+
+## 6. Domain Events
+
+The current code records audit events and background job records. The target
+modular-monolith direction is to make domain events explicit inside the
+application boundary before introducing any external broker. Kafka or another
+message bus is not required for the current architecture.
+
+| Event | Producer | Consumers | Purpose |
+| --- | --- | --- | --- |
+| `ClientCompanyCreated` | Accounting client-company service | Audit, Dashboard | Track onboarding and client metadata changes. |
+| `DocumentUploaded` | Accounting document service | OCR, Audit, Dashboard | Start intake observability and eligibility for OCR. |
+| `DocumentQueuedForOcr` | OCR request flow | Background job, Audit, Dashboard | Record transition from intake to extraction. |
+| `OcrCompleted` | OCR service | Review queue, Audit, Dashboard | Make extracted fields available for validation. |
+| `OcrFailed` | OCR service | Audit, Dashboard, Operations | Surface retry/failure handling. |
+| `OcrFieldCorrected` | Review service | Audit, Dashboard, Future history view | Track human-in-the-loop corrections. |
+| `OcrResultApproved` | Review service | Document lifecycle, Audit, Export eligibility | Mark verified OCR data as approved. |
+| `DocumentApproved` | Accounting document service | Export, Audit, Dashboard | Make document available for export. |
+| `ExportBatchCreated` | Export service | Audit, Dashboard, Future artifact worker | Track export intent and template choice. |
+| `ExportCompleted` | Export service or worker | Audit, Dashboard, Download surface | Mark export artifact as available. |
+
+Event governance:
+
+- Events must include `organization_id`, `resource_id`, `actor_user_id` when
+  available and `correlation_id` for async workflows.
+- Events must avoid raw file bytes, raw provider responses, bearer tokens and
+  unrestricted invoice text.
+- Domain events should be emitted after successful state changes or through a
+  transactional outbox if external delivery is introduced.
+
+## 7. Regulatory And Data Governance Layer
+
+### Data Classification
+
+| Classification | Examples | Handling |
+| --- | --- | --- |
+| Public | Marketing copy, public repository metadata | No tenant restrictions required. |
+| Internal | Architecture docs, operational metrics without PII | Tenant-neutral internal access controls. |
+| Confidential | Client company metadata, document metadata, OCR field values, export summaries | Tenant isolation, RBAC and audit controls. |
+| Restricted | Raw document files, raw OCR provider payloads, auth tokens, secrets | Private storage, least privilege, no default frontend exposure. |
+
+### Retention Targets
+
+- Accounting documents: retain for 10 years unless a tenant-specific legal
+  requirement overrides this.
+- Audit logs: retain for at least 3 years.
+- Export history: retain for 5 years, with artifact retention configurable by
+  tenant policy.
+- Background job records: retain operational history for 90-180 days, then
+  archive or aggregate.
+- Raw OCR provider payloads: retain only while diagnostically necessary and
+  classify as restricted.
+
+### Standards Alignment
+
+- OWASP Top 10: upload validation, auth hardening, object authorization and
+  injection controls.
+- OWASP ASVS-ready: authentication, access control, validation, logging and file
+  handling controls should map to ASVS requirements before production.
+- SOC2-ready: auditability, access control, change tracking and availability
+  objectives.
+- ISO27001-ready: data classification, access control, retention and supplier
+  risk management.
+- GDPR/PDPA-ready: data minimization, retention policy, tenant isolation and
+  deletion/export governance where legally applicable.
+
+## 8. Human-In-The-Loop Strategy
+
+OCR is not the business outcome by itself. The intended outcome is reducing
+manual accounting workload while keeping reviewable, auditable accuracy for
+financial documents.
+
+Target operating model:
+
+- Target automation rate: 80% of documents require no material correction after
+  OCR confidence and validation rules mature.
+- Target human review rate: 20% of documents enter manual review due to low
+  confidence, missing fields or policy rules.
+- Target review SLA: 4 business hours for normal-priority documents.
+- Escalation: documents older than SLA enter a review alert queue.
+- Quality loop: field corrections feed future prompt/provider/template tuning.
+
+Review routing rules:
+
+- Low-confidence fields should be highlighted first.
+- Documents with failed OCR should enter an operational exception queue.
+- Approved documents must not be reprocessed without an explicit new version or
+  reprocessing reason.
+- Manual corrections must remain auditable at field level.
+
+## 9. Cost Architecture
+
+Cost control is a first-class architecture concern because OCR and AI providers
+can become the dominant variable cost.
+
+Cost control principles:
+
+- Detect duplicate documents before OCR provider calls.
+- Cache or reuse OCR results for identical file hashes where policy allows.
+- Avoid reprocessing approved documents.
+- Keep provider selection behind a registry to support cost-based routing.
+- Use confidence thresholds to reserve expensive models for difficult documents.
+- Batch export generation and avoid repeated template work.
+- Route large exports and OCR workloads through background jobs to smooth
+  operational load.
+- Track provider cost per document, per tenant and per accounting period.
+
+Cost KPIs:
+
+- OCR cost per successfully processed document.
+- OCR reprocessing rate.
+- Duplicate-prevention savings.
+- Provider timeout/retry cost.
+- Manual-review cost per corrected document.
+
+## 10. Bounded Contexts
 
 ### `app.core`
 
@@ -581,7 +853,7 @@ Current limitations:
 - Dashboard aggregation needs continued review to ensure all metrics use bounded
   aggregate SQL rather than unbounded row loading as data volume grows.
 
-## 6. Frontend Architecture
+## 11. Frontend Architecture
 
 The frontend is a Next.js application using the app router and a compact
 operational UI style.
@@ -613,7 +885,7 @@ Current limitations:
   fully wired into the review UI.
 - No frontend unit/E2E test harness is present yet.
 
-## 7. Chrome Extension Prototype
+## 12. Chrome Extension Prototype
 
 The `extension/chrome` directory contains a prototype Chrome extension with:
 
@@ -628,7 +900,7 @@ Architectural status:
 - Intended for future region OCR capture workflows.
 - Not yet treated as a production browser extension package.
 
-## 8. Data Model And Migrations
+## 13. Data Model And Migrations
 
 Alembic migrations currently include:
 
@@ -652,7 +924,7 @@ Migration rule:
 - Any persistence change must update SQLAlchemy models, Alembic migrations,
   tests and seed/demo data when relevant.
 
-## 9. API Surface
+## 14. API Surface
 
 Base path: `/api/v1`.
 
@@ -698,7 +970,7 @@ Current API contract gaps:
 - Admin audit and user lists still need explicit pagination.
 - Export download endpoint is not a true file download endpoint yet.
 
-## 10. Lifecycle Policies
+## 15. Lifecycle Policies
 
 Lifecycle policy is implemented in `app.domains.accounting.lifecycle`.
 
@@ -740,7 +1012,7 @@ Current implementation note:
 - Small export creation currently creates a batch as `queued` and transitions it
   directly to `completed` in the same service call.
 
-## 11. Security State
+## 16. Security State
 
 Implemented controls:
 
@@ -766,7 +1038,7 @@ Known security gaps:
 - Audit/event payload classification is not fully formalized.
 - Admin audit list needs pagination and safe metadata review at scale.
 
-## 12. Performance And Reliability State
+## 17. Performance And Reliability State
 
 Implemented controls:
 
@@ -786,7 +1058,7 @@ Known performance/reliability gaps:
 - Dashboard and admin list endpoints need continued aggregate-query and
   pagination hardening.
 
-## 13. Observability State
+## 18. Observability State
 
 Current:
 
@@ -803,7 +1075,7 @@ Target:
 - Add dashboard metrics for OCR queue depth, OCR failures, review workload,
   export volume and audit volume.
 
-## 14. Testing State
+## 19. Testing State
 
 Current backend tests cover:
 
@@ -841,7 +1113,7 @@ Testing gaps:
 - No production database migration test pipeline in repository CI, because CI
   workflow files could not be pushed with the current token scope.
 
-## 15. Current ADRs
+## 20. Current ADRs
 
 ### ADR-001: Modular Monolith First
 
@@ -878,7 +1150,7 @@ Testing gaps:
 - Impact: Adding export formats should be isolated to serializer contracts and
   tests.
 
-## 16. Open Architecture Gates
+## 21. Open Architecture Gates
 
 These are the current gates after reading the source state:
 
