@@ -1,0 +1,2 @@
+"""Accounting document intake domain."""
+

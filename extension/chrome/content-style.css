@@ -1,0 +1,8 @@
+.opsbridge-region-box {
+  position: fixed;
+  z-index: 2147483647;
+  border: 2px solid #0f766e;
+  background: rgba(15, 118, 110, 0.16);
+  pointer-events: none;
+}
+

@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "OpsBridge Region OCR",
+  "version": "0.1.0",
+  "description": "Select document regions and send bounding boxes to OpsBridge OCR.",
+  "permissions": ["activeTab", "storage", "scripting"],
+  "host_permissions": ["http://localhost:8000/*"],
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content-script.js"],
+      "css": ["content-style.css"]
+    }
+  ]
+}
+
