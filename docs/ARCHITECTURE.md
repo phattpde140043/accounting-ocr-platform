@@ -1473,7 +1473,175 @@ Cost KPIs:
 - Provider timeout/retry cost.
 - Manual-review cost per corrected document.
 
-## 12. Bounded Contexts
+## 12. Query And Index Budget
+
+The production target is to make every high-volume flow explainable by query
+shape, expected index and latency budget. Current migrations already include
+several single-column indexes; composite indexes below are target hardening
+items for production scale.
+
+| Flow | Query Shape | Target Index | Target |
+| --- | --- | --- | --- |
+| Document list | `organization_id` + optional `status`, `client_company_id`, `accounting_period` ordered by `created_at` | `(organization_id, status, client_company_id, accounting_period, created_at)` | P95 < 300ms |
+| Review queue | `organization_id` + `status = needs_review` ordered by `created_at` | `(organization_id, status, created_at)` | P95 < 500ms |
+| Client-company lookup | `organization_id` + `tax_code` | unique `(organization_id, tax_code)` | P95 < 200ms |
+| OCR jobs | `status`, `available_at`, `attempts` | `(status, available_at, attempts)` | safe worker claiming |
+| OCR result detail | `organization_id` + `document_id`, then `result_id` fields | `(organization_id, document_id, created_at)`, `(organization_id, result_id)` | P95 < 300ms |
+| Export batch lookup | `organization_id` + `batch_id` | `(organization_id, batch_id)` | P95 < 300ms |
+| Audit events | `organization_id` + `created_at` descending | `(organization_id, created_at)` | paginated audit P95 < 700ms |
+| Dashboard metrics | `organization_id` + status/date aggregates | aggregate indexes per metric source | dashboard < 1s |
+
+Query rules:
+
+- No production list endpoint should return unbounded rows.
+- Pagination metadata should be added to all admin/audit/client list endpoints.
+- Dashboard cards should use aggregate SQL or read models, not row-by-row
+  processing.
+- Export generation should use batch/projection queries instead of per-document
+  lookup loops before production scale.
+
+## 13. OCR Confidence And Review Policy
+
+OCR confidence policy determines whether the system can automate, review or
+escalate a document. These thresholds are target operating defaults and should
+be tenant-configurable once production feedback exists.
+
+| Condition | Routing Decision | Rationale |
+| --- | --- | --- |
+| Overall confidence >= 0.95 and required fields present | Auto-approval candidate | High-confidence documents can bypass manual work after validation rules mature. |
+| Overall confidence from 0.70 to 0.95 | Human review | Normal uncertainty band for reviewer validation. |
+| Overall confidence < 0.70 | Exception queue | Low-confidence extraction requires priority attention. |
+| Required fields missing | Human review | Missing accounting fields block approval/export. |
+| Invoice total mismatch | Human review | Financial mismatch must be resolved before approval. |
+| Duplicate invoice identity detected | Exception queue | Prevent duplicate accounting entries. |
+| Provider failure or corrupted document | Operational exception queue | Requires retry, alternate provider or manual handling. |
+
+Required fields for invoice workflows:
+
+- Seller tax code.
+- Invoice number.
+- Invoice symbol when applicable.
+- Invoice date.
+- Total amount.
+- Client company.
+- Accounting period.
+
+Policy notes:
+
+- Current source routes OCR output to `needs_review` by default.
+- Auto-approval should only be enabled after field validation, duplicate
+  detection and audit coverage are complete.
+- Manual correction should update field source to `manual` and preserve audit
+  metadata.
+
+## 14. Idempotency And Retry Strategy
+
+Production commands should be safe under client retry, worker retry and network
+timeout scenarios.
+
+| Command | Idempotency Key | Current/Target Behavior |
+| --- | --- | --- |
+| Document upload | `organization_id + content_hash` | Current duplicate upload returns 409 within tenant. |
+| OCR request | `organization_id + document_id + provider` | Target returns existing queued/running job instead of creating duplicates. |
+| OCR execution | `ocr_job_id + lifecycle status` | Target worker claim prevents double execution. |
+| Field correction | `field_id + version` | Target optimistic locking prevents lost updates. |
+| OCR approval | `result_id + current status` | Invalid or repeated transition is rejected by lifecycle policy. |
+| Export batch | client-supplied idempotency key or sorted document IDs + format | Target returns existing batch for retry-safe export creation. |
+| Region OCR | request hash + document ID + bounding boxes | Target prevents duplicate region provider calls when retried. |
+
+Retry rules:
+
+- Client retries should be safe for idempotent commands.
+- Worker retries should use exponential backoff and max attempts.
+- Provider timeouts should not leave jobs in permanently processing state.
+- Failed OCR jobs can move back to queued only through explicit retry policy.
+- Audit events should record retry attempts without duplicating business state.
+
+## 15. Durable Worker Claiming
+
+The current worker model is local and database-backed. Production OCR workers
+should claim jobs atomically to avoid duplicate execution across multiple worker
+instances.
+
+Worker candidate query:
+
+```sql
+status = 'queued'
+AND available_at <= now()
+AND attempts < max_attempts
+ORDER BY priority DESC, available_at ASC
+LIMIT :batch_size
+```
+
+Atomic claim update:
+
+```text
+queued -> processing
+locked_by = worker_id
+locked_until = now + processing_timeout
+attempts = attempts + 1
+```
+
+Claiming requirements:
+
+- Use row locking or an equivalent atomic update strategy.
+- Workers must skip locked rows.
+- `locked_until` allows recovery from crashed workers.
+- `available_at` supports scheduled retry/backoff.
+- Correlation ID must propagate from job to logs and audit events.
+
+Retry/backoff policy:
+
+- Attempt 1: immediate processing.
+- Attempt 2: retry after 1 minute.
+- Attempt 3: retry after 5 minutes.
+- Attempt 4: retry after 30 minutes.
+- After max attempts: mark failed and surface in operational exception queue.
+
+Failure handling:
+
+- Provider timeout -> job retry if attempts remain.
+- Validation failure -> terminal failed state.
+- Worker crash -> another worker can reclaim after `locked_until`.
+- Unknown provider -> fail closed without retry unless configuration changes.
+
+## 16. Upload Security Pipeline
+
+Document upload is one of the highest-risk boundaries because the platform
+accepts PDF/JPEG/PNG files from users.
+
+Pipeline:
+
+1. Authenticate user and resolve tenant context.
+2. Authorize upload role.
+3. Read upload with configured size guard.
+4. Validate extension against allowed type.
+5. Validate declared MIME type.
+6. Validate file signature/magic bytes.
+7. Sanitize original filename.
+8. Calculate content hash.
+9. Check tenant-scoped duplicate hash.
+10. Target production: antivirus/malware scan boundary.
+11. Store object in private storage through `StorageProvider`.
+12. Create `FileAsset` and `AccountingDocument` metadata.
+13. Permit OCR only after validation and storage succeed.
+
+Security rules:
+
+- Do not trust MIME type alone.
+- Do not store files under caller-controlled paths.
+- Do not log raw file bytes.
+- Do not OCR rejected or quarantined files.
+- Private object storage should deny direct public access.
+
+Production hardening:
+
+- Add antivirus scan integration before OCR.
+- Add quarantine status for suspicious files.
+- Add streaming hash/storage for larger file limits.
+- Add file parser sandbox if PDF text extraction becomes local.
+
+## 17. Bounded Contexts
 
 ### `app.core`
 
@@ -1574,7 +1742,7 @@ Current limitations:
 - Dashboard aggregation needs continued review to ensure all metrics use bounded
   aggregate SQL rather than unbounded row loading as data volume grows.
 
-## 13. Frontend Architecture
+## 18. Frontend Architecture
 
 The frontend is a Next.js application using the app router and a compact
 operational UI style.
@@ -1606,7 +1774,7 @@ Current limitations:
   fully wired into the review UI.
 - No frontend unit/E2E test harness is present yet.
 
-## 14. Chrome Extension Prototype
+## 19. Chrome Extension Prototype
 
 The `extension/chrome` directory contains a prototype Chrome extension with:
 
@@ -1621,7 +1789,7 @@ Architectural status:
 - Intended for future region OCR capture workflows.
 - Not yet treated as a production browser extension package.
 
-## 15. Data Model And Migrations
+## 20. Data Model And Migrations
 
 Alembic migrations currently include:
 
@@ -1645,7 +1813,7 @@ Migration rule:
 - Any persistence change must update SQLAlchemy models, Alembic migrations,
   tests and seed/demo data when relevant.
 
-## 16. API Surface
+## 21. API Surface
 
 Base path: `/api/v1`.
 
@@ -1691,7 +1859,7 @@ Current API contract gaps:
 - Admin audit and user lists still need explicit pagination.
 - Export download endpoint is not a true file download endpoint yet.
 
-## 17. Lifecycle Policies
+## 22. Lifecycle Policies
 
 Lifecycle policy is implemented in `app.domains.accounting.lifecycle`.
 
@@ -1733,7 +1901,7 @@ Current implementation note:
 - Small export creation currently creates a batch as `queued` and transitions it
   directly to `completed` in the same service call.
 
-## 18. Security State
+## 23. Security State
 
 Implemented controls:
 
@@ -1759,7 +1927,7 @@ Known security gaps:
 - Audit/event payload classification is not fully formalized.
 - Admin audit list needs pagination and safe metadata review at scale.
 
-## 19. Performance And Reliability State
+## 24. Performance And Reliability State
 
 Implemented controls:
 
@@ -1779,7 +1947,7 @@ Known performance/reliability gaps:
 - Dashboard and admin list endpoints need continued aggregate-query and
   pagination hardening.
 
-## 20. Observability State
+## 25. Observability State
 
 Current:
 
@@ -1796,7 +1964,7 @@ Target:
 - Add dashboard metrics for OCR queue depth, OCR failures, review workload,
   export volume and audit volume.
 
-## 21. Testing State
+## 26. Testing State
 
 Current backend tests cover:
 
@@ -1834,7 +2002,7 @@ Testing gaps:
 - No production database migration test pipeline in repository CI, because CI
   workflow files could not be pushed with the current token scope.
 
-## 22. Current ADRs
+## 27. Current ADRs
 
 ### ADR-001: Modular Monolith First
 
@@ -1871,7 +2039,7 @@ Testing gaps:
 - Impact: Adding export formats should be isolated to serializer contracts and
   tests.
 
-## 23. Open Architecture Gates
+## 28. Open Architecture Gates
 
 These are the current gates after reading the source state:
 
@@ -1889,7 +2057,7 @@ These are the current gates after reading the source state:
   calls.
 - CI gate: add workflow once repository token has `workflow` scope.
 
-## 24. Production Readiness Roadmap
+## 29. Production Readiness Roadmap
 
 Priority order for the remaining production-grade architecture gaps:
 
