@@ -1,281 +1,324 @@
-# System Architecture Design: Accounting OCR Platform
+# Architecture: Accounting OCR Platform
+
+Last updated: 2026-05-29
 
 ## 1. Executive Summary
 
-The **Accounting OCR Platform** is a document intake, OCR, review and export platform for accounting service companies in Vietnam. It supports secure client-company document intake, AI-assisted invoice extraction, human-in-the-loop correction, approval, export batches and auditability.
+Accounting OCR Platform is a modular document intake, OCR, human review and
+export platform for accounting service teams. The source code currently
+implements a FastAPI backend, a Next.js frontend, a Chrome extension prototype,
+database migrations, tests and architecture/planning documentation.
 
-The project is currently a **FastAPI + NextJS modular monolith**. The intended long-term architecture keeps the modular monolith as the primary application boundary while allowing infrastructure adapters to evolve from local development implementations to production-grade services such as PostgreSQL, S3/MinIO-compatible object storage and Redis-backed workers.
+The current codebase should be treated as a modular monolith MVP. It already has
+clear bounded contexts, tenant-scoped repositories, upload validation, OCR
+provider abstraction, lifecycle policies, field-level OCR result contracts,
+export templates, audit events and a reviewer queue UI shell. It is not yet a
+production-ready deployment because authentication is still demo-friendly,
+workers/storage are local, reviewer correction UI is incomplete, export artifact
+download is simplified, and some list/admin APIs still need stronger pagination
+and aggregate-query hardening.
 
-## 2. Architecture Status
+## 2. Current Source State
 
-This document distinguishes between:
+### Repository Layout
 
-- **Current implementation**: what exists in the codebase now.
-- **Target architecture**: the direction that implementation tasks should move toward.
-- **Architecture gates**: decisions or contracts that must be resolved before production rollout.
+```text
+backend/       FastAPI app, SQLAlchemy models, Alembic migrations, tests, worker script
+frontend/      Next.js app for intake, dashboard, review queue, admin and AI pages
+extension/     Chrome extension prototype for page/region OCR capture
+docs/          Architecture, API contract and implementation plan
+infra/         Placeholder for future infrastructure code
+scripts/       Placeholder for project-level scripts
+```
 
-### Current Implementation
+### Implemented Runtime Components
 
-- Backend: Python FastAPI modular monolith.
-- Frontend: NextJS app shell with accounting, dashboard, AI/OCR and admin pages.
-- Database: SQLAlchemy models with Alembic migration backbone.
-- Tenant model: row-level `organization_id` filters through repositories and request context.
-- Auth: Google SSO callback and JWT issuance exist, but demo header auth is still accepted when bearer auth is absent.
-- Storage: local storage provider with a storage abstraction.
-- Background work: local background job abstraction and worker script.
-- OCR: provider interface exists, but job execution currently directly instantiates the mock provider.
-- Audit/observability: trace ID middleware and domain audit events exist.
+- Backend API: FastAPI app mounted under `/api/v1`.
+- Frontend app: Next.js app router with pages for overview, dashboard,
+  accounting intake, accounting review queue, AI and admin.
+- Database layer: SQLAlchemy async models and Alembic migrations.
+- Auth context: bearer JWT support plus demo header fallback.
+- Tenant model: `organization_id` propagated through request context and
+  repository filters.
+- Upload path: multipart upload with server-side size, MIME, extension and file
+  signature validation.
+- File storage: local filesystem provider behind `StorageProvider`.
+- Duplicate detection: per-tenant file content hash support.
+- OCR: provider registry with mock and OpenAI-capable provider boundary.
+- Review contract: OCR result exposes both legacy `fields` and `field_items`
+  with stable field IDs.
+- Export: JSON, MISA-style CSV and FAST-style CSV template serializers.
+- Audit/traceability: audit events, HTTP trace ID middleware and correlation IDs
+  for OCR/background/export flows.
+- Test suite: backend non-integration tests for lifecycle, contracts, upload
+  validation, duplicate handling, correlation IDs, exports, permissions and
+  platform boundaries.
 
-### Target Architecture
+### Known Local Artifacts
 
-- Backend remains a modular monolith with explicit bounded contexts.
-- Storage uses an injected provider boundary: local provider for development, S3/MinIO-compatible provider for production.
-- Background jobs use an explicit queue boundary: current local worker for development, Redis/Celery or equivalent durable worker when production scale requires it.
-- OCR providers are selected through a registry/factory boundary.
-- API responses are DTO-first, stable and safe for frontend consumption.
-- Status transitions are enforced by domain lifecycle policy functions, not arbitrary string mutation.
-- All list-heavy workflows expose bounded pagination/filter contracts.
+- `frontend/node_modules/` and `frontend/.next/` may exist locally after install
+  and build, but are ignored by git.
+- `.github/workflows/` is ignored because the current GitHub token cannot push
+  workflow files without `workflow` scope.
 
 ## 3. High-Level Architecture
 
 ```mermaid
 graph TD
-    Client["Browser / NextJS Client"] -->|HTTPS| API["FastAPI API /api/v1"]
-    Extension["Chrome Extension"] -->|HTTPS| API
+    Browser["Browser / Next.js"] --> API["FastAPI API /api/v1"]
+    Extension["Chrome Extension Prototype"] --> API
 
-    API --> Context["Auth + Tenant Context"]
+    API --> Context["Auth + Request Context"]
     Context --> Platform["platform domain"]
     Context --> Accounting["accounting domain"]
     Context --> Shared["shared domain"]
     Context --> Dashboard["dashboard domain"]
 
-    Accounting --> DB[("PostgreSQL")]
-    Platform --> DB
+    Platform --> DB[("PostgreSQL via SQLAlchemy")]
+    Accounting --> DB
     Shared --> DB
     Dashboard --> DB
 
-    Shared --> Storage["Storage Provider Boundary"]
-    Storage --> LocalStorage["Local Storage - current"]
-    Storage -. target .-> ObjectStorage["S3 / MinIO"]
+    Accounting --> OCRRegistry["OCR Provider Registry"]
+    OCRRegistry --> MockOCR["mock provider"]
+    OCRRegistry --> OpenAIOCR["openai provider boundary"]
 
-    Accounting --> JobBoundary["Background Job Boundary"]
-    JobBoundary --> LocalWorker["Local Worker - current"]
-    JobBoundary -. target .-> RedisWorker["Redis / Celery Worker"]
+    Shared --> StorageBoundary["StorageProvider"]
+    StorageBoundary --> LocalStorage["local filesystem storage"]
+    StorageBoundary -. target .-> ObjectStorage["S3 / MinIO-compatible storage"]
 
-    Accounting --> OcrRegistry["OCR Provider Registry"]
-    OcrRegistry --> MockProvider["Mock Provider - current"]
-    OcrRegistry -. target .-> OpenAIProvider["OpenAI Provider"]
+    Accounting --> Jobs["BackgroundJob records"]
+    Jobs --> LocalWorker["local worker script"]
+    Jobs -. target .-> DurableQueue["Redis/Celery or equivalent"]
 
-    API --> Audit["Audit Events + Trace IDs"]
-    JobBoundary --> Audit
+    Accounting --> Audit["Audit Events + Correlation IDs"]
+    Shared --> Audit
+    Platform --> Audit
 ```
 
 ## 4. Bounded Contexts
 
 ### `app.core`
 
-Owns cross-cutting infrastructure that must stay framework-level and domain-neutral:
+Current responsibilities:
 
-- Configuration.
-- Database session wiring.
-- Request context and auth provider selection.
-- Permission helpers.
-- Storage abstraction.
-- Trace ID middleware and observability primitives.
+- Runtime settings in `config.py`.
+- Async database engine/session wiring in `database.py`.
+- Auth principal, request context, role and permission dependencies.
+- JWT encode/decode helpers in `session.py`.
+- Local storage provider and upload validation in `storage.py`.
+- Trace ID middleware and request logging in `observability.py`.
+- Shared repository and model mixins.
 
-Architecture rule: `app.core` must not depend on accounting or platform domain services.
+Current limitations:
+
+- Settings are a plain Pydantic `BaseModel`, so environment loading is limited.
+- Demo header auth is always available when bearer auth is absent.
+- Local storage is the only implemented storage provider.
+
+Architecture rule:
+
+- `app.core` remains domain-neutral and must not import accounting/platform
+  services.
 
 ### `app.domains.platform`
 
-Owns identity, organizations, memberships, roles, sessions and audit administration:
+Current responsibilities:
 
-- Google SSO callback and profile verification.
-- Membership-to-principal resolution.
-- JWT/session issuance.
-- Admin user management.
-- Audit event listing.
+- Organizations, users, memberships, roles, permissions, audit and login models.
+- Google SSO verification modes and auth callback.
+- Membership-to-auth-principal resolution.
+- Admin user listing, creation and password reset request audit.
+- Organization list endpoint backed by current authenticated organization.
+- Audit event listing through admin service.
 
-Architecture gates:
+Current limitations:
 
-- Demo header auth must be explicitly environment-gated.
-- Production auth must fail closed on missing/invalid bearer tokens.
-- Production platform reads should be DB-backed; in-memory demo store usage must be removed or isolated from production endpoints.
+- Demo auth remains suitable for local development only.
+- Admin audit event list currently returns a simple `ListResponse` and still
+  needs bounded pagination parameters.
+- Password reset is an audited request stub, not a full email/token flow.
 
 ### `app.domains.shared`
 
-Owns reusable domain infrastructure:
+Current responsibilities:
 
-- File assets.
-- File upload validation.
-- Background job records.
-- Job lifecycle events.
+- `FileAsset` model with content hash and per-tenant hash uniqueness.
+- File asset creation with upload validation, safe filename normalization,
+  storage key generation and duplicate-file rejection.
+- `BackgroundJob` model with status, payload, attempts, error message and
+  correlation ID.
+- Background job lifecycle service and audit events.
 
-Architecture gates:
+Current limitations:
 
-- File assets need content hash support for duplicate detection.
-- Storage keys must not depend on unsafe original filenames.
-- Background jobs should carry correlation IDs and idempotency metadata where applicable.
+- Background jobs are database records plus a local worker script, not a durable
+  distributed queue.
+- File storage is local filesystem only.
+- Background job idempotency metadata is not fully modeled yet.
 
 ### `app.domains.accounting`
 
-Owns accounting service company workflows:
+Current responsibilities:
 
-- Client companies.
-- Accounting documents.
-- OCR jobs, results and fields.
-- Review/correction and approval.
-- Export batches.
-- Region OCR.
+- Client company CRUD basics.
+- Accounting document metadata creation and multipart upload.
+- Document list with tenant scope, filters and bounded offset pagination.
+- Document lifecycle transition service.
+- OCR job request and execution.
+- OCR provider registry lookup.
+- OCR result and field persistence.
+- OCR field update endpoint and audit event.
+- OCR result approval endpoint.
+- Export batch creation and simplified download.
+- Export templates for `json`, `misa` and `fast`.
+- Region OCR endpoint.
 
-Architecture gates:
+Current limitations:
 
-- Document/OCR/export statuses must be controlled by lifecycle policy functions.
-- OCR provider selection must use a registry/factory boundary.
-- OCR result DTOs must expose field IDs for review while excluding raw provider payload by default.
-- Export template serialization must be isolated from document lifecycle and HTTP transport.
+- OCR job execution is still exposed through an API endpoint and local worker
+  pattern; production should claim jobs from a durable queue.
+- Reviewer UI can inspect OCR fields but does not yet provide the complete
+  field editing/approval workbench.
+- Export creation currently loops through document IDs and download returns a
+  simplified JSON payload rather than a generated file response or stored
+  artifact reference.
+- Invoice identity fields exist on documents, but extraction-to-document
+  promotion and post-OCR duplicate policy are not fully implemented.
 
 ### `app.domains.dashboard`
 
-Owns aggregation APIs for tenant-scoped operational metrics:
+Current responsibilities:
 
-- Document counts.
-- OCR queue and failure counts.
-- Review workload counts.
-- Export batch counts.
-- Audit signal summaries.
+- Dashboard router and service for tenant-scoped accounting metrics.
 
-Architecture rule: dashboard APIs should use aggregate SQL queries, not unbounded row loading.
+Current limitations:
 
-## 5. Core Workflows
+- Dashboard aggregation needs continued review to ensure all metrics use bounded
+  aggregate SQL rather than unbounded row loading as data volume grows.
 
-### 5.1 Auth And Tenant Resolution
+## 5. Frontend Architecture
 
-Target flow:
+The frontend is a Next.js application using the app router and a compact
+operational UI style.
 
-1. User signs in through Google SSO or local/demo mode.
-2. Backend verifies identity.
-3. Backend resolves active membership and role.
-4. Backend issues JWT with `user_id`, `organization_id`, role and permissions.
-5. API requests derive tenant only from trusted backend-authenticated context.
+Current routes:
 
-Production rules:
+- `/`: overview shell.
+- `/dashboard`: dashboard page.
+- `/accounting`: intake list and upload form.
+- `/accounting/review`: review queue with client/period filters, selected
+  document state and OCR field preview.
+- `/ai`: AI/OCR surface placeholder.
+- `/admin`: admin surface placeholder.
 
-- Never trust `X-Organization-Id`, `X-User-Id` or `X-Role` headers in production.
-- Demo header auth is local/demo-only.
-- JWT secret and CORS origins must be environment-driven.
-- SSO audit events must not store raw Google ID tokens.
+Current API client behavior:
 
-### 5.2 Document Intake
+- Uses `NEXT_PUBLIC_API_BASE_URL`, defaulting to `http://localhost:8000/api/v1`.
+- Sends demo headers by default for local development.
+- Supports `GET`, `POST`, `PATCH` and multipart form POST.
+- Has accounting helpers for document list filters, upload, review queue,
+  OCR result fetch, OCR field update and OCR result approval.
 
-Target flow:
+Current limitations:
 
-1. Frontend submits multipart upload with file and accounting metadata.
-2. Backend validates file size, type, extension and signature.
-3. Backend calculates content hash.
-4. Backend stores file through storage provider boundary.
-5. Backend creates file asset and accounting document metadata.
-6. Backend emits audit event with safe metadata only.
+- API fetches do not yet use an explicit timeout or retry policy.
+- Review queue filtering is partly client-side after the initial
+  `needs_review` server-side query.
+- Field correction and approval flows are implemented as API helpers but are not
+  fully wired into the review UI.
+- No frontend unit/E2E test harness is present yet.
 
-Duplicate detection stages:
+## 6. Chrome Extension Prototype
 
-- Pre-OCR: content hash duplicate detection scoped by organization.
-- Post-OCR/review: invoice identity duplicate detection using seller tax code, invoice number, invoice symbol, invoice date and total amount.
+The `extension/chrome` directory contains a prototype Chrome extension with:
 
-Architecture rules:
+- `manifest.json`.
+- Background script.
+- Content script and content styles.
+- Popup HTML/CSS/JS.
 
-- File content is never stored in audit events.
-- Storage paths cannot be influenced by unsafe original filenames.
-- Upload APIs must remain bounded and reject oversize files server-side.
+Architectural status:
 
-### 5.3 OCR Processing
+- Prototype only.
+- Intended for future region OCR capture workflows.
+- Not yet treated as a production browser extension package.
 
-Target flow:
+## 7. Data Model And Migrations
 
-1. Document is submitted for OCR.
-2. OCR job is created with provider name, correlation ID and idempotency context.
-3. Background worker claims and executes the job.
-4. OCR provider registry resolves the provider.
-5. Provider returns normalized fields and confidence values.
-6. Accounting domain stores result and fields.
-7. Lifecycle policy routes document to the next state.
-8. Audit events record job completion or failure without raw provider payload.
+Alembic migrations currently include:
 
-Provider boundary:
+- `0001_schema_backbone.py`: core platform/shared/accounting schema backbone.
+- `0002_duplicate_detection_fields.py`: content hash and invoice identity
+  fields/indexes.
+- `0003_correlation_ids.py`: correlation IDs for jobs, audit events, OCR jobs
+  and export batches.
 
-- `mock`: deterministic local/testing provider.
-- `openai`: production-capable provider.
-- Future providers must implement the same provider protocol and be registered through the provider registry.
+Important model state:
 
-Architecture rules:
+- `AccountingDocument` stores file hash and invoice identity fields.
+- `FileAsset` stores content hash with tenant-scoped uniqueness.
+- `AccountingOcrJob`, `BackgroundJob`, `AuditEvent` and
+  `AccountingExportBatch` store correlation IDs.
+- `AccountingOcrResult` stores raw provider payload for backend diagnostics,
+  but normal reviewer DTOs do not expose it.
 
-- OCR service should not directly instantiate concrete provider classes in core execution flow.
-- Unknown provider names fail closed.
-- Raw provider payload is backend diagnostic data and is not returned by normal reviewer APIs.
+Migration rule:
 
-### 5.4 Review And Approval
+- Any persistence change must update SQLAlchemy models, Alembic migrations,
+  tests and seed/demo data when relevant.
 
-Target flow:
+## 8. API Surface
 
-1. Reviewer opens a paginated `needs_review` queue.
-2. Reviewer selects a document and loads OCR result DTO.
-3. UI displays field ID, key, value, confidence, source and confidence level.
-4. Reviewer edits fields.
-5. Backend records correction and audit event.
-6. Backend validates required fields.
-7. Backend approves OCR result and document through lifecycle policy.
+Base path: `/api/v1`.
 
-Architecture rules:
+Implemented accounting endpoints include:
 
-- Reviewer queue uses server-side filters and pagination.
-- Approval validation happens in backend service, not only in the UI.
-- Field correction audit metadata does not include sensitive raw document text unless explicitly classified as safe.
+- `GET /accounting/client-companies`
+- `POST /accounting/client-companies`
+- `GET /accounting/documents`
+- `POST /accounting/documents`
+- `POST /accounting/documents/upload`
+- `POST /accounting/documents/{document_id}/ocr-jobs`
+- `POST /accounting/documents/{document_id}/submit`
+- `POST /accounting/documents/{document_id}/mark-needs-review`
+- `POST /accounting/documents/{document_id}/approve`
+- `GET /accounting/documents/{document_id}/ocr-result`
+- `POST /accounting/ocr-jobs/{ocr_job_id}/execute`
+- `PATCH /accounting/ocr-results/{result_id}/fields/{field_id}`
+- `POST /accounting/ocr-results/{result_id}/approve`
+- `POST /accounting/export-batches`
+- `GET /accounting/export-batches/{batch_id}/download`
+- `POST /accounting/documents/{document_id}/region-ocr`
 
-### 5.5 Export
+Implemented platform endpoints include:
 
-Target flow:
+- `GET /me`
+- `GET /organizations`
+- `GET /admin/users`
+- `POST /admin/users`
+- `POST /admin/users/{user_id}/reset-password`
+- `GET /admin/audit-events`
 
-1. User selects approved documents.
-2. User selects export template: `json`, `misa` or `fast`.
-3. Export service validates tenant, status and template.
-4. Serializer maps reviewed fields to deterministic columns.
-5. Export artifact is generated or queued.
-6. Download endpoint returns a safe file response or expiring download reference.
-7. Audit event records creation and download without row contents.
+Current API contract strengths:
 
-Architecture rules:
+- Document list supports `status`, `client_company_id`, `accounting_period`,
+  `limit` and `offset`.
+- OCR result includes field IDs via `field_items`.
+- Upload errors and domain errors use stable `code` fields.
 
-- Export serializers are isolated from document lifecycle and HTTP routing.
-- Batch document loading uses tenant-scoped batched/projection queries.
-- Large exports must be bounded or routed through background jobs.
-- CSV/Excel cells must be escaped to prevent spreadsheet formula injection.
+Current API contract gaps:
 
-### 5.6 Dashboard And Admin Audit
+- Most `ListResponse` payloads include `items` only, without `total`, `limit`,
+  `offset` or `next_cursor` metadata.
+- Admin audit and user lists still need explicit pagination.
+- Export download endpoint is not a true file download endpoint yet.
 
-Target flow:
+## 9. Lifecycle Policies
 
-1. Dashboard calls tenant-scoped summary API.
-2. Backend computes aggregate counts for documents, OCR queues, failures, review workload, exports and audit events.
-3. Admin audit view reads paginated audit events.
-4. Audit rendering defaults to safe metadata fields.
+Lifecycle policy is implemented in `app.domains.accounting.lifecycle`.
 
-Architecture rules:
-
-- Dashboard cards use aggregate queries.
-- Audit event lists are paginated.
-- Admin UI must not render raw OCR payloads, tokens, file contents or export row contents by default.
-
-## 6. Domain Lifecycle Policy
-
-The accounting domain must own lifecycle transitions for:
-
-- Accounting documents.
-- OCR jobs.
-- OCR results.
-- Export batches.
-
-Direct arbitrary string mutation is not allowed in production paths.
-
-### Document Lifecycle
+### Accounting Document
 
 ```text
 uploaded -> queued -> processing -> needs_review -> approved -> exported
@@ -285,12 +328,7 @@ processing -> failed
 needs_review -> failed
 ```
 
-Notes:
-
-- `reviewed` may be introduced later if the product needs a separate state between correction completion and final approval.
-- `archived` may be introduced later as a terminal retention state.
-
-### OCR Job Lifecycle
+### OCR Job
 
 ```text
 queued -> processing -> completed
@@ -298,16 +336,14 @@ queued -> processing -> failed
 failed -> queued
 ```
 
-Retry rules must be explicit and idempotent.
-
-### OCR Result Lifecycle
+### OCR Result
 
 ```text
 needs_review -> approved
 needs_review -> rejected
 ```
 
-### Export Batch Lifecycle
+### Export Batch
 
 ```text
 queued -> processing -> completed
@@ -315,168 +351,163 @@ queued -> processing -> failed
 completed -> downloaded
 ```
 
-Small synchronous exports may skip `queued/processing` only if the service still records a valid lifecycle path.
+Current implementation note:
 
-## 7. API Contract Principles
+- Small export creation currently creates a batch as `queued` and transitions it
+  directly to `completed` in the same service call.
 
-- API base path: `/api/v1`.
-- Routers expose DTO schemas only.
-- Lists must include bounded pagination contracts.
-- Tenant is inferred from authenticated backend context.
-- Frontend must not pass organization IDs for tenant scoping.
-- OCR result detail must expose field IDs for correction APIs.
-- Raw provider payloads are excluded from normal frontend responses.
-- Error responses should use stable error `code` values.
+## 10. Security State
 
-### Pagination
+Implemented controls:
 
-Offset pagination is acceptable for current scale:
+- Tenant-scoped repository access by `organization_id`.
+- Role dependencies for privileged accounting/admin operations.
+- Upload size limit in stream reader and validation layer.
+- MIME, extension and file signature validation for PDF/JPEG/PNG.
+- Safe filename normalization.
+- Local storage path traversal guard.
+- Per-tenant duplicate content hash rejection.
+- Spreadsheet formula injection mitigation in CSV export templates.
+- Raw OCR provider payload excluded from normal OCR result DTO.
+- Audit events for important domain actions.
+- Correlation IDs across OCR, background job, audit and export records.
 
-- `limit`: bounded default, with server-side maximum.
-- `offset`: non-negative integer.
-- Optional filters: `status`, `client_company_id`, `accounting_period`, confidence level where supported.
+Known security gaps:
 
-Cursor pagination can be introduced later if queue size or ordering requirements outgrow offset pagination.
+- Demo header auth must be disabled or strictly environment-gated for
+  production.
+- Secrets are represented by local defaults and need production secret
+  management.
+- CORS and deployment host restrictions are not documented as production-ready.
+- Audit/event payload classification is not fully formalized.
+- Admin audit list needs pagination and safe metadata review at scale.
 
-## 8. Data Model And Migration Principles
+## 11. Performance And Reliability State
 
-Every significant persistence change must include:
+Implemented controls:
 
-- SQLAlchemy model update.
-- Alembic migration.
-- Seed/demo data update if needed.
-- Tests for tenant isolation and backward-compatible defaults.
+- Document list has bounded `limit` with server-side max of 100.
+- Common document filters are represented in model indexes.
+- Upload reading is chunked and rejects oversized payloads.
+- Background job records include attempts and status.
+- OCR provider lookup fails closed for unknown providers.
 
-Required model evolution:
+Known performance/reliability gaps:
 
-- Add content hash support for file assets or accounting documents.
-- Add invoice identity fields or normalized OCR/reviewed field indexes that can support duplicate detection.
-- Add export artifact metadata if exports produce stored files.
-- Add correlation ID storage for background jobs and/or audit events if needed for traceability.
+- Export service currently fetches documents one by one.
+- Export artifacts are not stored or streamed as files yet.
+- Local worker is not durable and has no distributed locking/claiming strategy.
+- Frontend API calls need timeout handling to avoid SSR/client hangs when the
+  backend is unavailable.
+- Dashboard and admin list endpoints need continued aggregate-query and
+  pagination hardening.
 
-## 9. Security Architecture
-
-### Multi-Tenant Isolation
-
-- Every query and mutation must include backend-resolved `organization_id`.
-- Cross-tenant IDs must return not found or permission denied without revealing existence.
-- Tests must cover tenant isolation for upload, review, approval, export, audit and dashboard APIs.
-
-### Auth And RBAC
-
-- Production mode fails closed without valid bearer auth.
-- Demo header auth is local/demo-only.
-- Role/permission checks are required for upload, review, approval, export and admin audit access.
-
-### Data Minimization
-
-Never store or render these values in normal audit or frontend payloads:
-
-- Raw file bytes.
-- Raw OCR provider prompts/responses.
-- Google ID tokens.
-- Bearer tokens.
-- Export row contents.
-- Sensitive invoice text not required for the current UI action.
-
-### Upload Safety
-
-- Validate size, MIME, extension and file signature server-side.
-- Sanitize original filenames.
-- Generate storage keys from safe IDs.
-- Calculate content hash.
-- Reject duplicate file hashes per tenant where policy requires.
-
-## 10. Performance And Reliability
-
-### Query Performance
-
-- Reviewer queues, document lists, audit lists and dashboard cards must be bounded.
-- Dashboard metrics should use aggregate SQL queries.
-- Export generation must avoid N+1 document fetches.
-- Common filters should be backed by indexes: `organization_id`, `client_company_id`, `status`, `ocr_status`, `accounting_period`, created timestamp and export batch IDs.
-
-### Background Reliability
-
-- OCR and large exports should be retryable and idempotent.
-- Background jobs must carry enough context to continue without request scope.
-- Worker logs and audit events should include correlation IDs.
-- External provider failure should mark jobs/documents predictably and safely.
-
-### Export Reliability
-
-- Small exports can be synchronous if bounded.
-- Large exports should be background jobs.
-- Artifact creation must be idempotent or protected by idempotency keys.
-
-## 11. Observability
+## 12. Observability State
 
 Current:
 
 - HTTP trace ID middleware.
-- Structured request log.
-- Audit events for several domain actions.
+- Structured request logging.
+- Audit events for document creation, status changes, OCR request/completion/
+  failure, field updates, exports, admin actions and background job changes.
+- Correlation ID columns on core async/audit entities.
 
 Target:
 
-- Correlation ID propagated from request to background job to audit event.
-- Audit event catalog with safe metadata fields.
-- Dashboard metrics for OCR queue, OCR failures, needs review, exports and audit volume.
-- Worker logs include job ID, document ID, organization ID and correlation ID.
+- Standardize event catalog and metadata classification.
+- Include correlation IDs consistently in worker logs.
+- Add dashboard metrics for OCR queue depth, OCR failures, review workload,
+  export volume and audit volume.
 
-## 12. Architecture Decision Records
+## 13. Testing State
 
-These ADRs summarize current decisions. If implementation changes them, update this section.
+Current backend tests cover:
+
+- Permission helpers.
+- Trace ID middleware.
+- Accounting lifecycle policies.
+- OCR result API contract.
+- Document list filters and tenant-scoped query contract.
+- OCR provider registry.
+- File service duplicate detection.
+- Upload validation.
+- Export templates and CSV escaping.
+- Platform router DB-backed organization boundary.
+- Correlation ID contracts.
+- Database metadata contract as an integration-marked test.
+
+Latest known verification from this development session:
+
+```bash
+cd backend
+python3 -m pytest app/tests -q -m 'not integration'
+# 36 passed, 1 deselected
+
+cd frontend
+npm run lint
+npm run build
+# completed successfully
+```
+
+Testing gaps:
+
+- No frontend unit test suite yet.
+- No Playwright/E2E coverage yet.
+- No full Docker Compose smoke test recorded in this architecture file.
+- No production database migration test pipeline in repository CI, because CI
+  workflow files could not be pushed with the current token scope.
+
+## 14. Current ADRs
 
 ### ADR-001: Modular Monolith First
 
-- Context: The product is domain-rich but not yet large enough to justify microservices.
 - Decision: Keep one FastAPI modular monolith with explicit domain packages.
-- Alternatives: Separate services per domain; serverless functions per workflow.
-- Trade-offs: Faster development and simpler transactions now; requires strict module boundaries to avoid coupling.
-- Impact: New features must fit `core`, `platform`, `shared`, `accounting` or `dashboard`.
+- Reason: The product is domain-rich but not large enough to justify
+  microservices yet.
+- Impact: New backend code should fit `core`, `platform`, `shared`,
+  `accounting` or `dashboard`.
 
 ### ADR-002: Local Worker Now, Durable Queue Later
 
-- Context: Docs previously described Celery/Redis, while code has a local background job abstraction.
-- Decision: Treat local worker as current implementation and keep a queue boundary for future Celery/Redis.
-- Alternatives: Adopt Celery/Redis immediately; run OCR synchronously.
-- Trade-offs: Local worker is simpler for MVP; durable queue is required for production reliability and retries at scale.
-- Impact: Job code must not depend on request scope and must be idempotent.
+- Decision: Use database-backed background job records and local worker scripts
+  for MVP; keep a queue boundary for future Redis/Celery or equivalent.
+- Impact: Job handlers must not depend on request scope and should move toward
+  idempotent retry-safe execution.
 
 ### ADR-003: Storage Provider Boundary
 
-- Context: Code uses local storage, while target architecture needs private object storage.
-- Decision: Keep storage provider abstraction. Local provider is development/default; S3/MinIO provider is production target.
-- Alternatives: Direct local filesystem usage; direct S3 usage in services.
-- Trade-offs: Provider abstraction adds a small layer but prevents storage coupling.
-- Impact: Services depend on `StorageProvider`, not concrete storage backends.
+- Decision: Keep `StorageProvider`; local filesystem is current implementation,
+  S3/MinIO-compatible storage is target production implementation.
+- Impact: Domain services should depend on `StorageProvider`, not raw filesystem
+  or object-storage SDKs.
 
 ### ADR-004: OCR Provider Registry
 
-- Context: OCR service currently directly instantiates the mock provider.
-- Decision: Move toward provider registry/factory resolving `mock`, `openai` and future providers.
-- Alternatives: Inline provider creation; separate OCR service per provider.
-- Trade-offs: Registry keeps service logic stable and makes provider selection testable.
-- Impact: Unknown provider names fail closed; provider raw payload remains backend-only by default.
+- Decision: Resolve OCR providers through a registry/factory boundary.
+- Impact: Unknown provider names fail closed; provider payloads stay backend-only
+  unless a safe diagnostic endpoint is explicitly designed.
 
 ### ADR-005: Export Serializer Boundary
 
-- Context: Export service will support JSON, MISA and FAST formats.
-- Decision: Separate template serializers from export batch lifecycle and HTTP download transport.
-- Alternatives: Hard-code templates in router/service.
-- Trade-offs: More structure, but easier tests and safer expansion.
-- Impact: Adding new export formats should not affect review or document lifecycle logic.
+- Decision: Keep export template serializers separate from lifecycle and HTTP
+  routing.
+- Impact: Adding export formats should be isolated to serializer contracts and
+  tests.
 
-## 13. Open Architecture Gates
+## 15. Open Architecture Gates
 
-These gates are tracked in `docs/PLAN.md` and must be resolved before production readiness:
+These are the current gates after reading the source state:
 
-- AG-1: Record architecture ADRs for worker/storage/OCR/export divergence.
-- AG-2: Define domain lifecycle policy.
-- AG-3: Define OCR provider registry boundary.
-- AG-4: Define file asset and duplicate detection data model.
-- AG-5: Stabilize API contract and pagination architecture.
-- AG-6: Define export architecture boundary.
-- AG-7: Remove or isolate demo store from production platform APIs.
-- AG-8: Define correlation ID propagation across async work.
+- Production auth gate: disable or environment-gate demo header auth.
+- Durable worker gate: replace local worker path with a claimable durable queue
+  strategy before production OCR volume.
+- Object storage gate: add S3/MinIO provider and private object access policy.
+- Review UI gate: complete field editing, save states, approval action and
+  correction history UI.
+- Export gate: return real export artifacts or expiring download references;
+  avoid N+1 document fetches.
+- Pagination gate: add metadata and bounded pagination to admin/audit/client
+  list endpoints.
+- Frontend reliability gate: add fetch timeout/error handling for SSR and client
+  calls.
+- CI gate: add workflow once repository token has `workflow` scope.
