@@ -18,7 +18,20 @@ workers/storage are local, reviewer correction UI is incomplete, export artifact
 download is simplified, and some list/admin APIs still need stronger pagination
 and aggregate-query hardening.
 
-## 2. Current Source State
+## 2. Requirement Mapping To Assignment Scope
+
+| Assignment Requirement | Architecture Feature | Current Source Evidence | Production Notes |
+| --- | --- | --- | --- |
+| Google SSO | Google SSO Authentication | `auth_router.py`, `google_sso.py`, `auth_membership_service.py` | Needs production fail-closed mode and strict Google client configuration. |
+| Admin authorization, history and statistics | Admin And Security Management, Dashboard And Operational Analytics | Platform admin router, audit service, dashboard domain | Audit/admin pagination and role-specific dashboard hardening remain open. |
+| Import PDF/JPG/PNG invoices | Accounting Document Intake | Multipart upload endpoint, storage validation, file service | Add antivirus scanning boundary before production. |
+| Select company, invoice type and category | Client Company Management, Document Metadata & Classification | `client_company_id`, `document_type`, `category`, `accounting_period` | Add richer metadata validation and controlled vocabularies. |
+| OCR invoice extraction | OCR Job Processing | OCR provider registry, OCR job/result/field models | Durable worker and provider timeout/retry policies remain open. |
+| OCR result review UI | Reviewer Queue And Field Correction | `/accounting/review`, OCR result DTO with field IDs | Complete field editing, approval action and correction history UI. |
+| Send data to accounting/business software | Export Batch Management | JSON, MISA-style CSV and FAST-style CSV serializers | Implement real artifact download or expiring storage reference. |
+| Chrome extension with bounding boxes | Region OCR Extension Workflow | `extension/chrome`, region OCR endpoint | Requires separate extension security review before release. |
+
+## 3. Current Source State
 
 ### Repository Layout
 
@@ -61,7 +74,7 @@ scripts/       Placeholder for project-level scripts
 - `.github/workflows/` is ignored because the current GitHub token cannot push
   workflow files without `workflow` scope.
 
-## 3. High-Level Architecture
+## 4. High-Level Architecture
 
 ```mermaid
 graph TD
@@ -96,11 +109,81 @@ graph TD
     Platform --> Audit
 ```
 
-## 4. Solution Feature Requirements
+## 5. Solution Feature Requirements
 
 This section maps the architecture to business outcomes, compliance needs and
 operational acceptance criteria. It is intentionally written as a portfolio-level
 solution architecture view, not only a module inventory.
+
+## Feature: Google SSO Authentication
+
+### Business Description
+
+Allows users to sign in with Google, maps verified identity to platform
+membership and issues a backend session context for tenant-scoped operations.
+
+### Job To Be Done (JTBD)
+
+**When** an employee or administrator accesses the platform
+
+**I want** authentication to happen through Google SSO and organization
+membership resolution
+
+**So that** only authorized users can access client documents, OCR workflows and
+administrative actions.
+
+### Compliance & Standards
+
+- OAuth/OIDC ID token verification.
+- Tenant-aware membership resolution.
+- RBAC and least privilege.
+- Login audit trail.
+- Fail-closed production authentication.
+
+### Acceptance Criteria
+
+- User can authenticate through Google callback.
+- Backend verifies Google identity before issuing platform access.
+- Email/user identity maps to an active membership and organization.
+- Unknown or inactive users are rejected.
+- JWT includes user, organization, role and permissions.
+- Login success/failure is auditable.
+- Demo header authentication is disabled or explicitly gated in production.
+
+### Non-Functional Requirements
+
+- Token verification should complete within P95 < 700ms excluding Google network
+  instability.
+- Session issuance must be stateless and horizontally scalable.
+- JWT secret and Google client ID must be environment-managed.
+- Auth failures must not reveal whether a tenant or user exists.
+
+### Business KPI
+
+- SSO login success rate > 99%.
+- Unauthorized access attempts blocked = 100%.
+- Average login completion time < 3 seconds.
+- Login audit coverage = 100%.
+
+### Key Risks And Mitigations
+
+- Risk: Demo auth accidentally accepted in production.
+  Mitigation: environment-gated auth provider selection and fail-closed
+  production mode.
+- Risk: Invalid Google token accepted.
+  Mitigation: strict ID token verification against configured client ID.
+- Risk: User has no valid membership.
+  Mitigation: membership resolution before JWT issuance.
+- Risk: Token leakage in logs.
+  Mitigation: never store raw ID tokens or bearer tokens in audit metadata.
+
+### Architecture Ownership
+
+- Backend owner: `app.domains.platform.auth_router`, `google_sso.py`,
+  `auth_membership_service.py`.
+- Auth context owner: `app.core.context`, `app.core.session`.
+- Data owner: `User`, `Membership`, `Role`, `LoginEvent`.
+- API owner: platform auth callback endpoints.
 
 ## Feature: Client Company Management
 
@@ -232,6 +315,70 @@ period, type and category metadata.
 - Data owner: `AccountingDocument`, `FileAsset`.
 - API owner: `POST /api/v1/accounting/documents/upload`.
 - Frontend owner: `frontend/app/accounting/create-document-form.tsx`.
+
+## Feature: Document Metadata & Classification
+
+### Business Description
+
+Classifies each accounting document by client company, accounting period,
+document type, business category and invoice identity so OCR, review, duplicate
+detection and export workflows can apply the right policies.
+
+### Job To Be Done (JTBD)
+
+**When** a document enters the platform
+
+**I want** required accounting metadata captured and normalized
+
+**So that** downstream OCR, review and export processes can route and validate
+the document correctly.
+
+### Compliance & Standards
+
+- Tenant isolation.
+- Controlled metadata vocabulary for document type and category.
+- Accounting period validation.
+- Invoice identity support for duplicate detection.
+- Audit trail for metadata changes.
+
+### Acceptance Criteria
+
+- Document metadata includes `client_company_id`, `document_type`, `category`
+  and `accounting_period`.
+- Invoice identity fields can store seller tax code, invoice number, invoice
+  symbol, invoice date and total amount.
+- Metadata belongs to backend-resolved organization context.
+- Document list supports status, client company and accounting period filters.
+- Metadata can support post-OCR duplicate detection policies.
+
+### Non-Functional Requirements
+
+- Common filters must be indexed.
+- Metadata validation should reject malformed accounting periods before export.
+- Metadata updates should remain auditable.
+- Classification should not require re-uploading the file.
+
+### Business KPI
+
+- Document classification completion rate > 99%.
+- Metadata correction rate < 5% after intake process stabilizes.
+- Duplicate invoice detection coverage > 95% after OCR promotion is completed.
+
+### Key Risks And Mitigations
+
+- Risk: Misclassified document causes wrong export mapping.
+  Mitigation: controlled categories and review validation before approval.
+- Risk: Invoice duplicate not detected.
+  Mitigation: invoice identity indexes and post-OCR duplicate policy.
+- Risk: Caller spoofs organization metadata.
+  Mitigation: organization is derived only from auth context.
+
+### Architecture Ownership
+
+- Backend owner: `AccountingDocumentService`.
+- Data owner: `AccountingDocument`.
+- API owner: document create/upload/list endpoints.
+- Frontend owner: accounting intake and review surfaces.
 
 ## Feature: OCR Job Processing
 
@@ -378,7 +525,9 @@ fields, correct values and approve OCR results.
 ### Business Description
 
 Allows approved accounting documents to be grouped and exported in accounting
-system-friendly templates.
+system-friendly templates. This completes the assignment workflow by preparing
+verified OCR data for downstream accounting or business software rather than
+expanding the product beyond the intake-to-accounting handoff scope.
 
 ### Job To Be Done (JTBD)
 
@@ -625,11 +774,13 @@ main intake pipeline.
 - API owner: `POST /api/v1/accounting/documents/{document_id}/region-ocr`.
 - Extension owner: `extension/chrome`.
 
-## 5. Business Capability Matrix
+## 6. Business Capability Matrix
 
 | Capability | Primary KPI | Primary Risk | Mitigation | Owner |
 | --- | --- | --- | --- | --- |
+| Google SSO Authentication | Login success rate > 99% | Demo auth or invalid token acceptance | Fail-closed production auth and ID token verification | Platform domain |
 | Client Company Management | Duplicate setup incidents < 1% | Conflicting client identity | Tenant-scoped uniqueness and merge review | Accounting domain |
+| Document Metadata & Classification | Classification completion rate > 99% | Wrong classification or duplicate invoice | Controlled metadata and invoice identity indexes | Accounting domain |
 | Document Intake | Upload success rate > 99% | Malicious or oversized upload | Validation, size limits and storage boundary | Accounting + Shared domains |
 | OCR Processing | Automation rate > 80% | Provider failure or accuracy drop | Provider registry, retry policy and review queue | Accounting domain |
 | Review Workflow | Review SLA < 4 business hours | Backlog growth | Queue filters, dashboard metrics and SLA alerting | Accounting + Dashboard domains |
@@ -638,7 +789,574 @@ main intake pipeline.
 | Dashboard | Dashboard load < 1s | Slow aggregate queries | Aggregate SQL and bounded endpoints | Dashboard domain |
 | Region OCR | Region OCR < 10s | Sensitive region capture | Explicit selection, RBAC and extension review | Accounting + Extension |
 
-## 6. Domain Events
+## 7. Technical Deep Dive Per Feature
+
+This section proves how each feature is expected to operate at production-grade
+quality. Items marked as current describe source code that exists now; target
+items describe required hardening before production rollout.
+
+## Technical Deep Dive: Google SSO Authentication
+
+### Processing Flow
+
+1. User starts Google sign-in from the frontend.
+2. Google returns an ID token to the backend callback flow.
+3. Backend verifies ID token according to configured verifier mode.
+4. Backend maps verified email or subject to a platform user.
+5. Backend resolves active organization membership and role.
+6. Backend creates JWT with `user_id`, `organization_id`, role and permissions.
+7. Backend records login audit metadata without raw tokens.
+8. Frontend uses bearer token for subsequent API requests.
+
+### Data Model
+
+- `User`
+- `Organization`
+- `Membership`
+- `Role`
+- `Permission`
+- `LoginEvent`
+
+### API Contract
+
+- Platform Google auth callback endpoint.
+- `GET /api/v1/me`
+- Authenticated API requests with bearer JWT.
+
+### Validation Rules
+
+- ID token must be verified against configured Google client ID in production.
+- User must map to an active membership.
+- Role and permissions come from backend membership state.
+- Production mode must not trust demo headers.
+
+### Security Controls
+
+- Fail-closed bearer auth target.
+- JWT signing with environment-managed secret.
+- RBAC/permission dependencies on protected endpoints.
+- No raw Google ID tokens in audit or logs.
+
+### Performance Controls
+
+- Stateless JWT validation for normal requests.
+- Membership lookup indexed by organization/user relationships.
+- Optional future session cache for high-volume tenants.
+
+### Failure Handling
+
+- Invalid token -> 401.
+- Missing membership -> 403 or 401 without tenant disclosure.
+- Inactive user -> 403.
+- Google verifier unavailable -> fail closed in production.
+
+### Test Cases
+
+- Reject invalid Google token.
+- Reject user without membership.
+- Issue JWT with correct organization and role.
+- Audit successful login.
+- Production mode rejects demo headers.
+
+## Technical Deep Dive: Client Company Management
+
+### Processing Flow
+
+1. Admin or employee submits client company metadata.
+2. Backend validates authenticated context and role.
+3. Backend applies current `organization_id` from request context.
+4. Repository checks tenant-scoped tax-code uniqueness.
+5. Client company row is created.
+6. Audit event records mutation metadata.
+7. Document intake can reference the client company.
+
+### Data Model
+
+- `AccountingClientCompany`
+- `AccountingDocument`
+- `AuditEvent`
+
+### API Contract
+
+- `GET /api/v1/accounting/client-companies`
+- `POST /api/v1/accounting/client-companies`
+
+### Validation Rules
+
+- Caller cannot provide `organization_id`.
+- Tax code uniqueness is scoped by organization.
+- Document upload requires a valid client company reference.
+- Future archive/soft-delete should prevent hard delete when documents exist.
+
+### Security Controls
+
+- RBAC on write endpoints.
+- Tenant-scoped repository queries.
+- Audit trail for mutations.
+
+### Performance Controls
+
+- Index on `(organization_id, tax_code)`.
+- Add pagination before production-scale client lists.
+- Avoid document-count N+1 when showing client summaries.
+
+### Failure Handling
+
+- Duplicate tax code -> conflict.
+- Unauthorized role -> 403.
+- Invalid client reference during upload -> 404 or validation error.
+
+### Test Cases
+
+- Create client company as admin/employee.
+- Reject duplicate tax code in same organization.
+- Allow same tax code in different organization if legally valid.
+- Ensure list does not return cross-tenant clients.
+- Reject caller-supplied organization ownership.
+
+## Technical Deep Dive: Document Intake & Metadata Classification
+
+### Processing Flow
+
+1. User chooses client company, accounting period, document type and category.
+2. Frontend uploads multipart file.
+3. Backend validates auth/RBAC.
+4. Backend reads upload in bounded chunks.
+5. Backend validates size, MIME, extension and file signature.
+6. Backend sanitizes original filename.
+7. Backend calculates content hash.
+8. Backend checks duplicate hash in the same organization.
+9. Backend stores bytes through `StorageProvider`.
+10. Backend creates `FileAsset` and `AccountingDocument`.
+11. Backend records audit metadata and future `DocumentUploaded` event.
+
+### Data Model
+
+- `AccountingDocument`
+- `FileAsset`
+- `AccountingClientCompany`
+- `AuditEvent`
+
+### API Contract
+
+- `POST /api/v1/accounting/documents/upload`
+- `POST /api/v1/accounting/documents`
+- `GET /api/v1/accounting/documents`
+
+### Validation Rules
+
+- Only PDF/JPEG/PNG are supported.
+- Do not trust MIME alone from the client.
+- File larger than configured limit is rejected before document metadata commit.
+- `organization_id` comes from auth context, not payload.
+- Accounting period should be normalized before production export workflows.
+
+### Security Controls
+
+- RBAC upload permission.
+- Tenant isolation.
+- Safe filename normalization.
+- Path traversal protection in local storage provider.
+- No raw file content in audit logs.
+
+### Performance Controls
+
+- Chunked upload reading.
+- Hash before OCR provider call.
+- Index or unique constraint on tenant-scoped content hash.
+- Current source reads final content into memory; production hardening should
+  stream hash/storage for very large files.
+
+### Failure Handling
+
+- Unsupported file type -> 400.
+- Oversized file -> 413.
+- Duplicate file -> 409.
+- Storage failure -> DB metadata must not be committed.
+- DB failure -> file metadata is not committed; future cleanup job should remove
+  orphaned stored objects.
+
+### Test Cases
+
+- Reject oversized file.
+- Reject fake MIME/signature mismatch.
+- Reject extension mismatch.
+- Reject duplicate hash within organization.
+- Allow same content hash across organizations only if policy allows.
+- No document created when upload validation fails.
+
+## Technical Deep Dive: OCR Job Processing
+
+### Processing Flow
+
+1. User or workflow requests OCR for an uploaded document.
+2. Backend validates tenant, role and document lifecycle.
+3. Backend creates `AccountingOcrJob` with provider and correlation ID.
+4. Backend creates `BackgroundJob` payload with document/provider context.
+5. Worker or execute endpoint moves job to processing.
+6. OCR provider registry resolves the concrete provider.
+7. Provider returns normalized fields, confidence and raw diagnostic payload.
+8. Backend persists OCR result and field rows.
+9. Backend transitions document to `needs_review` or `failed`.
+10. Backend records audit event and future domain event.
+
+### Data Model
+
+- `AccountingDocument`
+- `AccountingOcrJob`
+- `AccountingOcrResult`
+- `AccountingOcrField`
+- `BackgroundJob`
+- `AuditEvent`
+
+### API Contract
+
+- `POST /api/v1/accounting/documents/{document_id}/ocr-jobs`
+- `POST /api/v1/accounting/ocr-jobs/{ocr_job_id}/execute`
+
+### Validation Rules
+
+- Document must belong to current organization.
+- Document transition to queued/processing must be valid.
+- Provider must exist in registry.
+- Raw provider payload is not part of normal frontend DTO.
+
+### Security Controls
+
+- Tenant-scoped document/job lookup.
+- Provider allowlist.
+- Audit event with correlation ID.
+- Raw provider payload classified as restricted.
+
+### Performance Controls
+
+- Background job boundary for OCR latency.
+- Provider abstraction supports model/cost optimization.
+- Future durable queue should support claim locking and retry backoff.
+- Duplicate detection avoids unnecessary OCR provider calls.
+
+### Failure Handling
+
+- Missing document -> 404.
+- Invalid transition -> 400.
+- Unknown provider -> fail closed.
+- Provider failure -> OCR job and document move to failed.
+- Retry should be explicit and idempotent.
+
+### Test Cases
+
+- Creates OCR job and background job.
+- Unknown provider fails closed.
+- OCR completion creates result and fields.
+- OCR failure records failed state.
+- Raw provider payload not exposed in OCR result API.
+
+## Technical Deep Dive: Reviewer Queue & Field Correction
+
+### Processing Flow
+
+1. Reviewer opens `/accounting/review`.
+2. Frontend requests documents with `status=needs_review`, `limit` and `offset`.
+3. User filters queue by client company or accounting period.
+4. User selects a document.
+5. Frontend fetches OCR result detail.
+6. Backend returns `fields` and `field_items` with field IDs.
+7. Reviewer edits fields through field update endpoint.
+8. Backend records manual source and audit event.
+9. Reviewer approves OCR result.
+10. Backend transitions OCR result/document through lifecycle policy.
+
+### Data Model
+
+- `AccountingDocument`
+- `AccountingOcrResult`
+- `AccountingOcrField`
+- `AuditEvent`
+
+### API Contract
+
+- `GET /api/v1/accounting/documents?status=needs_review&limit=50&offset=0`
+- `GET /api/v1/accounting/documents/{document_id}/ocr-result`
+- `PATCH /api/v1/accounting/ocr-results/{result_id}/fields/{field_id}`
+- `POST /api/v1/accounting/ocr-results/{result_id}/approve`
+
+### Validation Rules
+
+- Result and field must belong to current organization.
+- Field ID must belong to result ID.
+- Approval transition must be valid.
+- Future required-field validation must pass before approval.
+
+### Security Controls
+
+- RBAC for correction and approval.
+- Tenant-scoped result and field repository access.
+- Raw provider payload excluded from DTO.
+- Audit correction metadata without unrestricted raw document text.
+
+### Performance Controls
+
+- Bounded review queue.
+- Indexed document filters.
+- Field list is scoped by result ID.
+- Future correction history requires pagination.
+
+### Failure Handling
+
+- OCR result missing -> 404.
+- Field not found or does not belong to result -> 404.
+- Invalid approval transition -> 400.
+- Save failure -> no partial approval.
+
+### Test Cases
+
+- Queue route exposes filters and bounded pagination.
+- Query is tenant-scoped.
+- OCR result exposes field IDs.
+- Missing field ID fails schema validation.
+- Field update changes source to manual and audits change.
+
+## Technical Deep Dive: Export Batch Management
+
+### Processing Flow
+
+1. User selects approved documents.
+2. User selects export format: `json`, `misa` or `fast`.
+3. Backend validates RBAC and tenant ownership.
+4. Backend validates all documents are approved.
+5. Backend validates template through allowlist.
+6. Backend creates export batch and export item rows.
+7. Serializer maps document fields into selected format.
+8. Backend records audit metadata with correlation ID.
+9. Download endpoint returns simplified payload today; target is file response or
+   expiring object-storage reference.
+
+### Data Model
+
+- `AccountingExportBatch`
+- `AccountingExportItem`
+- `AccountingDocument`
+- `AuditEvent`
+
+### API Contract
+
+- `POST /api/v1/accounting/export-batches`
+- `GET /api/v1/accounting/export-batches/{batch_id}/download`
+
+### Validation Rules
+
+- Only approved documents can be exported.
+- Export format must be one of `json`, `misa`, `fast`.
+- All documents must belong to current organization.
+- Export status transition must be valid.
+
+### Security Controls
+
+- RBAC for export creation/download.
+- Tenant-scoped document and batch lookup.
+- Spreadsheet formula injection escaping.
+- Export audit trail without row contents by default.
+
+### Performance Controls
+
+- Serializer boundary isolates format work.
+- Batch document loading should replace current one-by-one fetch before scale.
+- Large exports should move to background jobs.
+- Stored artifacts should prevent repeated generation cost.
+
+### Failure Handling
+
+- Unknown format -> 400.
+- Non-approved document -> 400.
+- Missing document -> 404.
+- Large export timeout -> target background job flow.
+
+### Test Cases
+
+- Reject unsupported template.
+- Reject non-approved documents.
+- Escape formula-like CSV cells.
+- Create export batch with items.
+- Tenant cannot download another tenant's export.
+
+## Technical Deep Dive: Dashboard
+
+### Processing Flow
+
+1. Authenticated user opens dashboard.
+2. Backend resolves organization and role.
+3. Dashboard service queries tenant-scoped aggregate metrics.
+4. Backend returns read-only projection.
+5. Frontend renders role-appropriate cards and operational signals.
+
+### Data Model
+
+- `AccountingDocument`
+- `AccountingOcrJob`
+- `AccountingExportBatch`
+- `AuditEvent`
+- Optional future read model tables.
+
+### API Contract
+
+- Dashboard domain endpoints under `/api/v1/dashboard`.
+
+### Validation Rules
+
+- Metrics are scoped by organization.
+- Role decides visible metrics.
+- Dashboard payload cannot include raw OCR payload or file bytes.
+
+### Security Controls
+
+- Read-only access.
+- Tenant-scoped aggregate queries.
+- Role-based metric visibility.
+
+### Performance Controls
+
+- Aggregate SQL only.
+- No row-by-row processing for dashboard cards.
+- Future cache/read model when tenant volume grows.
+- Target dashboard load < 1s.
+
+### Failure Handling
+
+- Aggregate query failure -> controlled API error.
+- Missing optional metrics -> degrade section, not full dashboard.
+- Permission failure -> 403.
+
+### Test Cases
+
+- Metrics are tenant-scoped.
+- Dashboard does not expose raw payloads.
+- Aggregate query path does not load all rows.
+- Role-specific visibility hides admin metrics from lower roles.
+
+## Technical Deep Dive: Admin, RBAC & Audit
+
+### Processing Flow
+
+1. Admin calls user/audit endpoint.
+2. Backend authenticates request.
+3. `require_roles("admin")` enforces role.
+4. Admin service reads or mutates tenant-scoped records.
+5. Privileged mutation records audit metadata.
+6. Audit list returns safe event DTOs.
+
+### Data Model
+
+- `User`
+- `Organization`
+- `Membership`
+- `Role`
+- `Permission`
+- `RolePermission`
+- `AuditEvent`
+
+### API Contract
+
+- `GET /api/v1/admin/users`
+- `POST /api/v1/admin/users`
+- `POST /api/v1/admin/users/{user_id}/reset-password`
+- `GET /api/v1/admin/audit-events`
+- `GET /api/v1/organizations`
+- `GET /api/v1/me`
+
+### Validation Rules
+
+- Admin endpoints require admin role.
+- User and audit queries are organization-scoped.
+- Role/permission resolution is backend-owned.
+- Audit event metadata must follow safe schema.
+
+### Security Controls
+
+- RBAC and least privilege.
+- Object authorization through tenant scope.
+- Privileged actions audited.
+- No secrets, tokens or raw files in audit payloads.
+
+### Performance Controls
+
+- Add pagination for audit and user lists before production scale.
+- Index audit queries by organization, action, resource and timestamp.
+- Avoid joining large audit payloads into admin summary views.
+
+### Failure Handling
+
+- Non-admin role -> 403.
+- Missing user -> 404.
+- Password reset request failure -> audited failure target.
+- Audit list too large -> target pagination/cursor response.
+
+### Test Cases
+
+- Non-admin is rejected from admin endpoints.
+- Admin sees only current tenant users.
+- Organization list is DB-backed and context-scoped.
+- Privileged action creates audit event.
+- Audit list pagination contract before production.
+
+## Technical Deep Dive: Chrome Extension Region OCR
+
+### Processing Flow
+
+1. User opens extension popup.
+2. Content script captures user-selected region or page coordinates.
+3. Extension sends region payload with document context to backend.
+4. Backend validates tenant, role and document ownership.
+5. Backend validates bounding box structure.
+6. Region OCR service processes bounded regions.
+7. Backend returns text, confidence and box metadata.
+
+### Data Model
+
+- `AccountingDocument`
+- Region OCR request/response DTOs.
+- Future audit event and extracted-region model if region OCR becomes durable.
+
+### API Contract
+
+- `POST /api/v1/accounting/documents/{document_id}/region-ocr`
+- Chrome extension popup/content/background scripts.
+
+### Validation Rules
+
+- Document context is required.
+- Bounding boxes require page, x, y, width and height.
+- Region count and dimensions should be bounded before production.
+- Extension cannot bypass backend tenant context.
+
+### Security Controls
+
+- RBAC on region OCR endpoint.
+- Tenant-scoped document lookup.
+- Extension permission review before release.
+- No implicit capture without user action.
+
+### Performance Controls
+
+- Limit regions per request.
+- Reuse OCR provider boundary where practical.
+- Apply cost controls for region OCR provider calls.
+
+### Failure Handling
+
+- Missing document -> 404.
+- Invalid bounding box -> validation error.
+- Provider failure -> controlled OCR error response.
+- Extension permission failure -> user-visible error.
+
+### Test Cases
+
+- Reject cross-tenant document.
+- Reject invalid bounding box.
+- Return text/confidence/box metadata.
+- Extension scripts load with expected manifest permissions.
+- Region count limit enforced before production.
+
+## 8. Domain Events
 
 The current code records audit events and background job records. The target
 modular-monolith direction is to make domain events explicit inside the
@@ -647,8 +1365,11 @@ message bus is not required for the current architecture.
 
 | Event | Producer | Consumers | Purpose |
 | --- | --- | --- | --- |
+| `GoogleLoginSucceeded` | Platform auth service | Audit, Security monitoring | Track authenticated access and membership resolution. |
+| `GoogleLoginFailed` | Platform auth service | Audit, Security monitoring | Detect invalid token, inactive user or missing membership. |
 | `ClientCompanyCreated` | Accounting client-company service | Audit, Dashboard | Track onboarding and client metadata changes. |
 | `DocumentUploaded` | Accounting document service | OCR, Audit, Dashboard | Start intake observability and eligibility for OCR. |
+| `DocumentMetadataClassified` | Accounting document service | Review queue, Export, Dashboard | Track classification changes and export routing metadata. |
 | `DocumentQueuedForOcr` | OCR request flow | Background job, Audit, Dashboard | Record transition from intake to extraction. |
 | `OcrCompleted` | OCR service | Review queue, Audit, Dashboard | Make extracted fields available for validation. |
 | `OcrFailed` | OCR service | Audit, Dashboard, Operations | Surface retry/failure handling. |
@@ -667,7 +1388,7 @@ Event governance:
 - Domain events should be emitted after successful state changes or through a
   transactional outbox if external delivery is introduced.
 
-## 7. Regulatory And Data Governance Layer
+## 9. Regulatory And Data Governance Layer
 
 ### Data Classification
 
@@ -703,7 +1424,7 @@ Event governance:
 - GDPR/PDPA-ready: data minimization, retention policy, tenant isolation and
   deletion/export governance where legally applicable.
 
-## 8. Human-In-The-Loop Strategy
+## 10. Human-In-The-Loop Strategy
 
 OCR is not the business outcome by itself. The intended outcome is reducing
 manual accounting workload while keeping reviewable, auditable accuracy for
@@ -727,7 +1448,7 @@ Review routing rules:
   reprocessing reason.
 - Manual corrections must remain auditable at field level.
 
-## 9. Cost Architecture
+## 11. Cost Architecture
 
 Cost control is a first-class architecture concern because OCR and AI providers
 can become the dominant variable cost.
@@ -752,7 +1473,7 @@ Cost KPIs:
 - Provider timeout/retry cost.
 - Manual-review cost per corrected document.
 
-## 10. Bounded Contexts
+## 12. Bounded Contexts
 
 ### `app.core`
 
@@ -853,7 +1574,7 @@ Current limitations:
 - Dashboard aggregation needs continued review to ensure all metrics use bounded
   aggregate SQL rather than unbounded row loading as data volume grows.
 
-## 11. Frontend Architecture
+## 13. Frontend Architecture
 
 The frontend is a Next.js application using the app router and a compact
 operational UI style.
@@ -885,7 +1606,7 @@ Current limitations:
   fully wired into the review UI.
 - No frontend unit/E2E test harness is present yet.
 
-## 12. Chrome Extension Prototype
+## 14. Chrome Extension Prototype
 
 The `extension/chrome` directory contains a prototype Chrome extension with:
 
@@ -900,7 +1621,7 @@ Architectural status:
 - Intended for future region OCR capture workflows.
 - Not yet treated as a production browser extension package.
 
-## 13. Data Model And Migrations
+## 15. Data Model And Migrations
 
 Alembic migrations currently include:
 
@@ -924,7 +1645,7 @@ Migration rule:
 - Any persistence change must update SQLAlchemy models, Alembic migrations,
   tests and seed/demo data when relevant.
 
-## 14. API Surface
+## 16. API Surface
 
 Base path: `/api/v1`.
 
@@ -970,7 +1691,7 @@ Current API contract gaps:
 - Admin audit and user lists still need explicit pagination.
 - Export download endpoint is not a true file download endpoint yet.
 
-## 15. Lifecycle Policies
+## 17. Lifecycle Policies
 
 Lifecycle policy is implemented in `app.domains.accounting.lifecycle`.
 
@@ -1012,7 +1733,7 @@ Current implementation note:
 - Small export creation currently creates a batch as `queued` and transitions it
   directly to `completed` in the same service call.
 
-## 16. Security State
+## 18. Security State
 
 Implemented controls:
 
@@ -1038,7 +1759,7 @@ Known security gaps:
 - Audit/event payload classification is not fully formalized.
 - Admin audit list needs pagination and safe metadata review at scale.
 
-## 17. Performance And Reliability State
+## 19. Performance And Reliability State
 
 Implemented controls:
 
@@ -1058,7 +1779,7 @@ Known performance/reliability gaps:
 - Dashboard and admin list endpoints need continued aggregate-query and
   pagination hardening.
 
-## 18. Observability State
+## 20. Observability State
 
 Current:
 
@@ -1075,7 +1796,7 @@ Target:
 - Add dashboard metrics for OCR queue depth, OCR failures, review workload,
   export volume and audit volume.
 
-## 19. Testing State
+## 21. Testing State
 
 Current backend tests cover:
 
@@ -1113,7 +1834,7 @@ Testing gaps:
 - No production database migration test pipeline in repository CI, because CI
   workflow files could not be pushed with the current token scope.
 
-## 20. Current ADRs
+## 22. Current ADRs
 
 ### ADR-001: Modular Monolith First
 
@@ -1150,7 +1871,7 @@ Testing gaps:
 - Impact: Adding export formats should be isolated to serializer contracts and
   tests.
 
-## 21. Open Architecture Gates
+## 23. Open Architecture Gates
 
 These are the current gates after reading the source state:
 
@@ -1167,3 +1888,18 @@ These are the current gates after reading the source state:
 - Frontend reliability gate: add fetch timeout/error handling for SSR and client
   calls.
 - CI gate: add workflow once repository token has `workflow` scope.
+
+## 24. Production Readiness Roadmap
+
+Priority order for the remaining production-grade architecture gaps:
+
+1. Disable or strictly environment-gate demo header authentication.
+2. Add fail-closed production Google SSO mode with configured Google client ID.
+3. Introduce durable worker claiming for OCR jobs.
+4. Add private S3/MinIO-compatible object storage provider.
+5. Complete reviewer correction UI: edit, save, approve and correction history.
+6. Implement real export artifact generation/download with expiring references.
+7. Add pagination metadata for admin, audit and client-company lists.
+8. Add frontend fetch timeout, retry policy and backend-unavailable states.
+9. Add CI workflow once repository credentials include `workflow` scope.
+10. Add E2E smoke tests for upload -> OCR -> review -> approve -> export.
