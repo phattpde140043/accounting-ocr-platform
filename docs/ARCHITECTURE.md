@@ -1456,6 +1456,9 @@ can become the dominant variable cost.
 Cost control principles:
 
 - Detect duplicate documents before OCR provider calls.
+- Use a tiered OCR cache policy to minimize provider cost:
+  - Tier 1: keep active-document OCR diagnostics in short-lived private storage for up to 30 days.
+  - Tier 2: retain validated/approved fields for archived documents without duplicating large raw provider payloads.
 - Cache or reuse OCR results for identical file hashes where policy allows.
 - Avoid reprocessing approved documents.
 - Keep provider selection behind a registry to support cost-based routing.
