@@ -7,10 +7,15 @@ from app.domains.accounting.lifecycle import (
     AccountingDocumentStatus,
     can_document_transition,
 )
+from app.domains.accounting.metadata_policy import validate_document_metadata
 from app.domains.accounting.models import AccountingDocument
-from app.domains.accounting.repositories import AccountingDocumentRepository
+from app.domains.accounting.repositories import (
+    AccountingClientCompanyRepository,
+    AccountingDocumentRepository,
+)
 from app.domains.accounting.schemas import CreateAccountingDocumentIn
 from app.domains.platform.audit_service import AuditEventCreate, AuditLogService
+from app.domains.platform.audit_catalog import DomainEvent
 from app.domains.shared.file_service import FileService, FileUploadCreate
 
 
@@ -18,6 +23,7 @@ class AccountingDocumentService:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
         self.repository = AccountingDocumentRepository(session)
+        self.client_companies = AccountingClientCompanyRepository(session)
         self.audit_log = AuditLogService(session)
 
     async def list_documents(
@@ -47,6 +53,13 @@ class AccountingDocumentService:
         actor_user_id: str,
         payload: CreateAccountingDocumentIn,
     ) -> dict:
+        await self._ensure_valid_metadata(
+            organization_id=organization_id,
+            client_company_id=payload.client_company_id,
+            document_type=payload.document_type,
+            category=payload.category,
+            accounting_period=payload.accounting_period,
+        )
         document = AccountingDocument(
             id=new_id("doc"),
             organization_id=organization_id,
@@ -67,7 +80,7 @@ class AccountingDocumentService:
             AuditEventCreate(
                 organization_id=organization_id,
                 actor_user_id=actor_user_id,
-                action="accounting.document_created",
+                action=DomainEvent.DOCUMENT_UPLOADED.value,
                 resource_type="accounting_document",
                 resource_id=document.id,
                 metadata={"file_name": payload.file_name},
@@ -144,6 +157,13 @@ class AccountingDocumentService:
         content: bytes,
         storage: StorageProvider,
     ) -> dict:
+        await self._ensure_valid_metadata(
+            organization_id=organization_id,
+            client_company_id=client_company_id,
+            document_type=document_type,
+            category=category,
+            accounting_period=accounting_period,
+        )
         file_service = FileService(self.session, storage)
         asset = await file_service.create_file_asset(
             FileUploadCreate(
@@ -154,21 +174,51 @@ class AccountingDocumentService:
                 content=content,
             )
         )
-        document = await self.create_metadata_document(
-            organization_id=organization_id,
-            actor_user_id=actor_user_id,
-            payload=CreateAccountingDocumentIn(
-                client_company_id=client_company_id,
-                document_type=document_type,
-                category=category,
-                accounting_period=accounting_period,
-                file_asset_id=asset.id,
-                file_content_hash=asset.content_hash,
-                file_name=file_name,
-                mime_type=mime_type,
-            ),
+        try:
+            return await self.create_metadata_document(
+                organization_id=organization_id,
+                actor_user_id=actor_user_id,
+                payload=CreateAccountingDocumentIn(
+                    client_company_id=client_company_id,
+                    document_type=document_type,
+                    category=category,
+                    accounting_period=accounting_period,
+                    file_asset_id=asset.id,
+                    file_content_hash=asset.content_hash,
+                    file_name=file_name,
+                    mime_type=mime_type,
+                ),
+            )
+        except Exception:
+            await self.session.rollback()
+            await storage.delete(asset.storage_key)
+            raise
+
+    async def _ensure_valid_metadata(
+        self,
+        *,
+        organization_id: str,
+        client_company_id: str,
+        document_type: str,
+        category: str,
+        accounting_period: str,
+    ) -> None:
+        validate_document_metadata(
+            document_type=document_type,
+            category=category,
+            accounting_period=accounting_period,
         )
-        return document
+        client_company = await self.client_companies.get_for_org(
+            organization_id, client_company_id
+        )
+        if client_company is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "code": "client_company_not_found",
+                    "message": "Client company was not found for this organization.",
+                },
+            )
 
     def _serialize(self, document: AccountingDocument) -> dict:
         return {

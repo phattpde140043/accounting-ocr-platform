@@ -1,6 +1,6 @@
 # Accounting OCR Platform Master Plan
 
-Last updated: 2026-05-29
+Last updated: 2026-05-31
 
 This plan is derived from the approved `docs/ARCHITECTURE.md`. It is the
 sequential execution queue for agents. Tasks are ordered by dependency: do not
@@ -27,20 +27,22 @@ with an accepted workaround.
 | Area | Status | Evidence | Next Required Action |
 | --- | --- | --- | --- |
 | Architecture portfolio doc | Done | `ARCHITECTURE.md` includes requirement mapping, JTBD, KPI, risks, technical deep dives, governance, cost, query budget, retry and worker strategy. | Keep synced as implementation changes. |
-| Backend modular monolith | Partial | FastAPI domains exist for `core`, `platform`, `shared`, `accounting`, `dashboard`. | Harden production gaps in this plan. |
-| Frontend app shell | Partial | Next.js pages exist for overview, dashboard, accounting intake, review queue, AI and admin. | Complete review/edit/export/auth flows. |
-| Upload pipeline | Partial | Size/type/signature/hash/safe-name validation exists; AV scan/private object storage are target gaps. | Complete Task 3. |
-| OCR processing | Partial | Provider registry, jobs, fields, audit and correlation IDs exist. | Add confidence policy, idempotency and durable worker claiming. |
-| Review workflow | Partial | Review route and OCR preview exist; field editing/approval UI incomplete. | Complete Task 8. |
-| Export workflow | Partial | Template serializers exist; real artifact download/idempotent batch behavior incomplete. | Complete Task 9. |
-| Google SSO | Partial | Google verifier/callback/membership code exists; demo header fallback remains production risk. | Complete Task 1. |
+| Backend modular monolith | Implemented baseline | FastAPI domains exist for `core`, `platform`, `shared`, `accounting`, `dashboard`; migrations cover hardening work. | Add production object storage and scanner adapters. |
+| Frontend app shell | Implemented baseline | Next.js pages consume intake, review, export, dashboard, audit and auth helpers with bounded API timeout. | Add E2E harness and correction-history rendering. |
+| Upload pipeline | Implemented baseline | Size/type/signature/hash/safe-name validation and scanner boundary exist. | Add real production AV and private object storage adapters. |
+| OCR processing | Implemented baseline | Provider registry, confidence routing, idempotency, claimable jobs, leases and bounded backoff exist. | Deploy externally supervised workers. |
+| Review workflow | Implemented baseline | Review route, field editing, optimistic version save and approval UI exist. | Render audit-backed correction history. |
+| Export workflow | Implemented | Template allowlist, CSV injection protection, batch idempotency, projection lookup and audited artifact download are implemented. | Verify migrated-stack download in Task 12. |
+| Dashboard and audit | Implemented | Canonical domain events, safe audit metadata validation, aggregate tenant metrics and paginated admin audit UI are implemented. | Verify migrated-stack metrics in Task 12. |
+| Chrome region OCR | Implemented | API validates bounded regions and tenant document context; extension uses local bearer token, explicit page activation and documented least-privilege permissions. | Run packaged extension smoke outside this workspace. |
+| Google SSO | Done | Production auth fails closed without bearer token; local demo auth is explicit; Google verified-email check, login audit and callback UI are implemented. | Keep production environment variables configured securely. |
 | CI | Blocked | GitHub token cannot push workflow files without `workflow` scope. | Add workflow when credentials allow it. |
 
 ## Dependency-Ordered Execution Queue
 
 ### Task 1: Harden Google SSO And Production Auth
 
-- Status: Not Started
+- Status: Done
 - Dependencies: None
 - Architecture Trace: `Feature: Google SSO Authentication`, `Technical Deep Dive: Google SSO Authentication`, `Production Readiness Roadmap` items 1-2.
 
@@ -80,13 +82,15 @@ without storing tokens.
 
 #### Verification
 
-- Run backend compile and non-integration tests.
-- Add or update auth-focused tests and record pass count here.
-- Run frontend lint/build if callback UI changes.
+- Passed: `cd backend && python3 -m compileall app`.
+- Passed: `cd backend && python3 -m pytest app/tests -q -m 'not integration'`
+  (`43 passed, 1 deselected`).
+- Passed: `cd frontend && npm run lint`.
+- Passed: `cd frontend && npm run build`.
 
 ### Task 2: Add Pagination Metadata And Query/Index Budget Support
 
-- Status: Not Started
+- Status: Done
 - Dependencies: Task 1 can run independently, but finish before production signoff.
 - Architecture Trace: `Query And Index Budget`, `API Surface`, `Technical Deep Dive: Dashboard`, `Technical Deep Dive: Admin, RBAC & Audit`.
 
@@ -125,12 +129,15 @@ client companies, audit events and dashboard metrics.
 
 #### Verification
 
-- Backend tests cover list bounds, tenant isolation and pagination metadata.
-- Backend compile and non-integration tests pass.
+- Passed: list bounds, tenant isolation and pagination metadata tests.
+- Passed: `cd backend && python3 -m compileall app alembic`.
+- Passed: `cd backend && python3 -m pytest app/tests -q -m 'not integration'`
+  (`51 passed, 1 deselected`).
+- Passed: `git diff --check`.
 
 ### Task 3: Complete Upload Security Pipeline
 
-- Status: Partial
+- Status: Done
 - Dependencies: Task 2 for final list/pagination consistency; can start after Task 1 if auth changes touch upload context.
 - Architecture Trace: `Feature: Accounting Document Intake`, `Technical Deep Dive: Document Intake & Metadata Classification`, `Upload Security Pipeline`.
 
@@ -168,12 +175,16 @@ transaction/file cleanup behavior.
 
 #### Verification
 
-- Backend upload validation tests pass.
-- Backend compile and non-integration tests pass.
+- Passed: upload validation, AV boundary, quarantine, OCR blocking and orphan
+  cleanup tests.
+- Passed: `cd backend && python3 -m compileall app`.
+- Passed: `cd backend && python3 -m pytest app/tests -q -m 'not integration'`
+  (`57 passed, 1 deselected`).
+- Passed: `git diff --check`.
 
 ### Task 4: Implement Document Metadata And Classification Policy
 
-- Status: Not Started
+- Status: Done
 - Dependencies: Task 3.
 - Architecture Trace: `Feature: Document Metadata & Classification`, `Technical Deep Dive: Document Intake & Metadata Classification`.
 
@@ -210,12 +221,18 @@ detection.
 
 #### Verification
 
-- Backend tests cover metadata validation and duplicate identity behavior.
-- Backend compile and non-integration tests pass.
+- Passed: metadata validation, tenant-scoped client reference, identity promotion
+  and duplicate invoice identity tests.
+- Passed: `cd backend && python3 -m compileall app`.
+- Passed: `cd backend && python3 -m pytest app/tests -q -m 'not integration'`
+  (`64 passed, 1 deselected`).
+- Passed: targeted warning cleanup check
+  `cd backend && python3 -m pytest app/tests/test_document_metadata_policy.py -q`
+  (`7 passed`).
 
 ### Task 5: Add Idempotency And Retry Primitives
 
-- Status: Not Started
+- Status: Done
 - Dependencies: Tasks 3-4.
 - Architecture Trace: `Idempotency And Retry Strategy`, `Domain Events`, `Cost Architecture`.
 
@@ -250,12 +267,18 @@ artifact workflows expand the number of retry paths.
 
 #### Verification
 
-- Backend idempotency tests pass.
-- Backend compile and non-integration tests pass.
+- Passed: OCR request reuse, export key stability/reuse and stale correction
+  rejection tests.
+- Passed: `cd backend && python3 -m compileall app alembic`.
+- Passed: `cd backend && python3 -m pytest app/tests -q -m 'not integration'`
+  (`68 passed, 1 deselected`).
+- Passed: `cd frontend && npm run lint`.
+- Passed: `cd frontend && npm run build`.
+- Passed: `git diff --check`.
 
 ### Task 6: Implement Durable Worker Claiming Contract
 
-- Status: Not Started
+- Status: Done
 - Dependencies: Task 5.
 - Architecture Trace: `Durable Worker Claiming`, `OCR Job Processing`, `ADR-002`.
 
@@ -293,12 +316,15 @@ Move from local worker assumptions toward claimable job semantics:
 
 #### Verification
 
-- Backend worker/job tests pass.
-- Backend compile and non-integration tests pass.
+- Passed: atomic claim SQL, lock lease, bounded backoff and terminal failure tests.
+- Passed: `cd backend && python3 -m compileall app alembic`.
+- Passed: `cd backend && python3 -m pytest app/tests -q -m 'not integration'`
+  (`71 passed, 1 deselected`).
+- Passed: `git diff --check`.
 
 ### Task 7: Implement OCR Confidence And Review Routing Policy
 
-- Status: Not Started
+- Status: Done
 - Dependencies: Task 6.
 - Architecture Trace: `OCR Confidence And Review Policy`, `Human-In-The-Loop Strategy`, `Feature: OCR Job Processing`.
 
@@ -335,12 +361,17 @@ auto-approval candidate, human review and exception queue.
 
 #### Verification
 
-- Backend confidence policy tests pass.
-- Frontend lint/build pass if queue display changes.
+- Passed: confidence boundary and missing-required-field routing tests.
+- Passed: `cd backend && python3 -m compileall app alembic`.
+- Passed: `cd backend && python3 -m pytest app/tests -q -m 'not integration'`
+  (`76 passed, 1 deselected`).
+- Passed: `cd frontend && npm run lint`.
+- Passed: `cd frontend && npm run build`.
+- Passed: `git diff --check`.
 
 ### Task 8: Complete Reviewer Queue, Field Correction And Approval UI
 
-- Status: Partial
+- Status: Done
 - Dependencies: Task 7.
 - Architecture Trace: `Feature: Reviewer Queue And Field Correction`, `Technical Deep Dive: Reviewer Queue & Field Correction`.
 
@@ -380,13 +411,20 @@ action and correction history.
 
 #### Verification
 
-- Backend review/approval tests pass.
-- Frontend lint/build pass.
-- Manual verification notes are added to this task.
+- Passed: backend required-field approval validation test.
+- Passed: `cd backend && python3 -m compileall app`.
+- Passed: `cd backend && python3 -m pytest app/tests -q -m 'not integration'`
+  (`77 passed, 1 deselected`).
+- Passed: `cd frontend && npm run lint`.
+- Passed: `cd frontend && npm run build`.
+- UI smoke: `http://127.0.0.1:3000/accounting/review` renders the review page and
+  the expected API-unavailable state while backend services are offline.
+- Remaining integrated smoke: edit/save/approve with a migrated database is
+  deferred to Task 12.
 
 ### Task 9: Implement Export Artifact And Batch Idempotency
 
-- Status: Partial
+- Status: Done
 - Dependencies: Tasks 5 and 8.
 - Architecture Trace: `Feature: Export Batch Management`, `Technical Deep Dive: Export Batch Management`, `Idempotency And Retry Strategy`.
 
@@ -424,13 +462,19 @@ safe download and retry-safe batch creation.
 
 #### Verification
 
-- Backend export tests pass.
-- Frontend lint/build pass.
-- Manual export download verification is recorded.
+- Passed: batched document fetch, audited safe artifact download and repeated
+  download service tests.
+- Passed: template allowlist, MISA/FAST mapping and CSV formula injection tests.
+- Passed: `cd backend && python3 -m compileall -q app alembic`.
+- Passed: `cd backend && python3 -m pytest -q` (`80 passed`).
+- Passed: `cd frontend && npm run lint`.
+- Passed: `git diff --check`.
+- Remaining integrated smoke: download against a migrated database is deferred
+  to Task 12.
 
 ### Task 10: Implement Operational Traceability, Audit Catalog And Dashboard Signals
 
-- Status: Not Started
+- Status: Done
 - Dependencies: Tasks 7-9.
 - Architecture Trace: `Domain Events`, `Regulatory And Data Governance Layer`, `Observability State`, `Dashboard And Operational Analytics`.
 
@@ -469,12 +513,16 @@ audit views.
 
 #### Verification
 
-- Backend audit/dashboard tests pass.
-- Frontend lint/build pass if admin/dashboard UI changes.
+- Passed: event catalog, audit metadata boundary and safe correction metadata.
+- Passed: dashboard aggregate query tenant-scope test.
+- Passed: `cd backend && python3 -m compileall -q app alembic`.
+- Passed: `cd backend && python3 -m pytest -q` (`87 passed`).
+- Passed: `git diff --check`.
+- Passed: `cd frontend && npm run lint && npm run build`.
 
 ### Task 11: Harden Chrome Extension Region OCR
 
-- Status: Not Started
+- Status: Done
 - Dependencies: Task 7 for OCR policy, Task 10 for audit/event conventions.
 - Architecture Trace: `Feature: Region OCR Extension Workflow`, `Technical Deep Dive: Chrome Extension Region OCR`.
 
@@ -509,12 +557,18 @@ permission-reviewed workflow.
 
 #### Verification
 
-- Backend region OCR tests pass.
-- Extension smoke check is documented manually.
+- Passed: invalid region, oversized region, cross-tenant reference and safe audit
+  metadata tests.
+- Passed: `cd backend && python3 -m compileall -q app alembic`.
+- Passed: `cd backend && python3 -m pytest -q` (`94 passed`).
+- Passed: `node --check` for `background.js`, `content-script.js` and `popup.js`.
+- Passed: `git diff --check`.
+- Manual extension packaging smoke remains external because Chrome extension
+  loading is outside this workspace runtime.
 
 ### Task 12: Final Verification, Documentation Sync And Release Handoff
 
-- Status: Not Started
+- Status: Done
 - Dependencies: Tasks 1-11.
 - Architecture Trace: `Production Readiness Roadmap`, `Testing State`, `Open Architecture Gates`.
 
@@ -550,4 +604,18 @@ handoff record.
 
 #### Verification
 
-- Record exact command outputs and commit SHA in this plan.
+- Passed: `cd backend && python3 -m compileall -q app alembic`.
+- Passed: `cd backend && python3 -m pytest -q` (`96 passed`).
+- Passed: `cd frontend && npm run lint && npm run build`.
+- Passed: `node --check` for `background.js`, `content-script.js` and
+  `popup.js`.
+- Passed: browser smoke for `/accounting`, `/accounting/review`, `/dashboard`
+  and `/admin`; offline fallback states rendered as expected while the backend
+  stack was unavailable.
+- Blocked: `docker compose ps` could not connect to the local Docker daemon, so
+  migrated-stack upload -> OCR -> review -> approve -> export verification
+  remains an external release check.
+- Passed: documentation sync for `.env.example`, Docker Compose, README files,
+  API spec and architecture state.
+- Release implementation commit SHA: recorded after final implementation
+  commit.

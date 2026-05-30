@@ -5,6 +5,7 @@ from fastapi import Depends, Header, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.core.auth_types import AuthPrincipal
+from app.core.config import settings
 from app.core.permissions import ROLE_PERMISSIONS, has_permission
 from app.core.session import decode_access_token
 
@@ -72,6 +73,15 @@ async def get_auth_provider(
     if credentials is not None:
         principal = decode_access_token(credentials.credentials)
         return StaticAuthProvider(principal)
+
+    if not settings.demo_auth_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={
+                "code": "missing_access_token",
+                "message": "A bearer access token is required.",
+            },
+        )
 
     return DemoHeaderAuthProvider(
         organization_id=organization_id,

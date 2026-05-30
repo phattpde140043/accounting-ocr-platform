@@ -30,10 +30,10 @@ audit-log, python, typescript, vietnam-accounting
 - Duplicate detection via file hash and invoice identity fields.
 - OCR provider boundary with mock and OpenAI-backed implementations.
 - OCR result contract with field IDs for field-by-field correction.
-- Reviewer queue UI with filters, selected-document state and OCR preview.
-- Export templates for JSON, MISA-style CSV and FAST-style CSV.
-- Audit events, trace IDs and correlation IDs for operational visibility.
-- Chrome extension prototype for region-based OCR workflows.
+- Reviewer queue UI with filters, versioned field correction and approval.
+- Export templates and audited downloads for JSON, MISA-style CSV and FAST-style CSV.
+- Canonical audit events, safe metadata validation and operational dashboard signals.
+- Chrome extension workflow with explicit active-page region selection.
 
 ## Architecture
 
@@ -127,6 +127,9 @@ X-User-Id: user_admin
 X-Role: admin
 ```
 
+Demo headers are accepted only when `ACCOUNTING_OCR_ENVIRONMENT` is `local` or
+`test` and `ACCOUNTING_OCR_AUTH_MODE=demo`. Production mode requires bearer JWT.
+
 ## Verification
 
 Backend:
@@ -159,11 +162,11 @@ npm run build
 
 ## Roadmap
 
-- Complete reviewer correction workflow with save, approval and history states.
-- Add production object storage and asynchronous worker infrastructure.
+- Add correction-history rendering from audit events.
+- Add production object storage and external queue infrastructure.
 - Expand accounting export formats and reconciliation validations.
 - Add end-to-end browser tests for upload, OCR review and export journeys.
-- Harden production authentication, deployment secrets and observability.
+- Add packaged Chrome extension release verification and production API origin.
 
 ## License
 

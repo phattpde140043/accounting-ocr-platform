@@ -226,6 +226,15 @@ nav a:hover {
   color: var(--accent-strong);
 }
 
+.button:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+.compact-button {
+  padding: 8px 10px;
+}
+
 .review-workbench {
   display: grid;
   grid-template-columns: minmax(360px, 0.95fr) minmax(420px, 1.25fr);
@@ -321,7 +330,7 @@ nav a:hover {
 
 .detail-metrics {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
   margin-bottom: 14px;
 }
@@ -350,12 +359,83 @@ nav a:hover {
 
 .field-preview-row {
   display: grid;
-  grid-template-columns: minmax(120px, 0.8fr) minmax(0, 1.3fr) 64px;
+  grid-template-columns: minmax(120px, 0.8fr) minmax(0, 1.3fr) 64px auto;
   gap: 12px;
   align-items: center;
   padding: 12px;
   border: 1px solid var(--line);
   border-radius: 8px;
+}
+
+.field-preview-row input {
+  width: 100%;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font: inherit;
+}
+
+.review-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.review-actions p {
+  margin: 0;
+}
+
+.panel-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+  margin-bottom: 14px;
+}
+
+.panel-heading p {
+  margin: 4px 0 0;
+}
+
+.panel-heading label {
+  display: grid;
+  min-width: 150px;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.panel-heading select {
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  font: inherit;
+}
+
+.export-document-list {
+  display: grid;
+  gap: 8px;
+}
+
+.export-document-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.export-document-row small {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
 }
 
 .empty-state {
@@ -401,7 +481,12 @@ nav a:hover {
   .review-workbench,
   .toolbar,
   .queue-row,
-  .field-preview-row {
+  .field-preview-row,
+  .panel-heading {
     grid-template-columns: 1fr;
+  }
+
+  .panel-heading {
+    display: grid;
   }
 }

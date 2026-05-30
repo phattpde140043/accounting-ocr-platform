@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -27,7 +27,7 @@ from app.domains.accounting.schemas import (
     RegionOcrOut,
     UpdateOcrFieldIn,
 )
-from app.domains.shared.schemas import ListResponse
+from app.domains.shared.schemas import ListResponse, build_offset_page_info
 
 router = APIRouter(prefix="/accounting", tags=["accounting"])
 
@@ -57,9 +57,19 @@ async def read_upload_content(file: UploadFile) -> bytes:
 async def list_client_companies(
     context: Annotated[RequestContext, Depends(get_request_context)],
     session: Annotated[AsyncSession, Depends(get_db_session)],
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
 ) -> dict:
     service = AccountingClientCompanyService(session)
-    return {"items": await service.list_client_companies(context.organization_id)}
+    items = await service.list_client_companies(
+        context.organization_id, limit=limit, offset=offset
+    )
+    return {
+        "items": items,
+        "page_info": build_offset_page_info(
+            item_count=len(items), limit=limit, offset=offset
+        ),
+    }
 
 
 @router.post("/client-companies", response_model=ClientCompanyOut)
@@ -87,15 +97,19 @@ async def list_documents(
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> dict:
     service = AccountingDocumentService(session)
+    items = await service.list_documents(
+        context.organization_id,
+        status=status,
+        client_company_id=client_company_id,
+        accounting_period=accounting_period,
+        limit=limit,
+        offset=offset,
+    )
     return {
-        "items": await service.list_documents(
-            context.organization_id,
-            status=status,
-            client_company_id=client_company_id,
-            accounting_period=accounting_period,
-            limit=limit,
-            offset=offset,
-        )
+        "items": items,
+        "page_info": build_offset_page_info(
+            item_count=len(items), limit=limit, offset=offset
+        ),
     }
 
 
@@ -243,6 +257,7 @@ async def update_ocr_field(
         result_id=result_id,
         field_id=field_id,
         value=payload.value,
+        version=payload.version,
     )
 
 
@@ -279,9 +294,20 @@ async def download_export_batch(
     batch_id: str,
     context: Annotated[RequestContext, Depends(require_roles("admin", "employee"))],
     session: Annotated[AsyncSession, Depends(get_db_session)],
-) -> dict:
+) -> Response:
     service = AccountingExportService(session)
-    return await service.download_export_batch(context.organization_id, batch_id)
+    artifact = await service.download_export_batch(
+        organization_id=context.organization_id,
+        actor_user_id=context.user_id,
+        batch_id=batch_id,
+    )
+    return Response(
+        content=artifact.content,
+        media_type=artifact.content_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{artifact.file_name}"'
+        },
+    )
 
 
 @router.post("/documents/{document_id}/region-ocr", response_model=RegionOcrOut)

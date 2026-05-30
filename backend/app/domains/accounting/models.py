@@ -1,4 +1,4 @@
-from sqlalchemy import ForeignKey, Index, Integer, JSON, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import ForeignKey, Index, Integer, JSON, Numeric, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -28,6 +28,20 @@ class AccountingDocument(IdMixin, TenantMixin, TimestampMixin, Base):
             "invoice_date",
             "total_amount",
         ),
+        Index(
+            "ix_accounting_documents_org_status_client_period_created",
+            "organization_id",
+            "status",
+            "client_company_id",
+            "accounting_period",
+            "created_at",
+        ),
+        Index(
+            "ix_accounting_documents_org_status_created",
+            "organization_id",
+            "status",
+            "created_at",
+        ),
     )
 
     client_company_id: Mapped[str] = mapped_column(
@@ -52,6 +66,16 @@ class AccountingDocument(IdMixin, TenantMixin, TimestampMixin, Base):
 
 class AccountingOcrJob(IdMixin, TenantMixin, TimestampMixin, Base):
     __tablename__ = "accounting_ocr_jobs"
+    __table_args__ = (
+        Index(
+            "uq_accounting_ocr_jobs_active_request",
+            "organization_id",
+            "document_id",
+            "provider",
+            unique=True,
+            postgresql_where=text("status IN ('queued', 'processing')"),
+        ),
+    )
 
     document_id: Mapped[str] = mapped_column(
         ForeignKey("accounting_documents.id"), index=True, nullable=False
@@ -72,6 +96,8 @@ class AccountingOcrResult(IdMixin, TenantMixin, TimestampMixin, Base):
     job_id: Mapped[str] = mapped_column(ForeignKey("accounting_ocr_jobs.id"), nullable=False)
     status: Mapped[str] = mapped_column(String(60), index=True, nullable=False)
     confidence: Mapped[float | None] = mapped_column(Numeric(5, 4))
+    review_route: Mapped[str] = mapped_column(String(60), index=True, nullable=False)
+    review_reasons: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     raw_payload: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
 
 
@@ -85,14 +111,23 @@ class AccountingOcrField(IdMixin, TenantMixin, TimestampMixin, Base):
     field_value: Mapped[str | None] = mapped_column(Text)
     confidence: Mapped[float | None] = mapped_column(Numeric(5, 4))
     source: Mapped[str] = mapped_column(String(40), default="ocr", nullable=False)
+    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
 
 
 class AccountingExportBatch(IdMixin, TenantMixin, TimestampMixin, Base):
     __tablename__ = "accounting_export_batches"
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id",
+            "idempotency_key",
+            name="uq_accounting_export_batch_idempotency",
+        ),
+    )
 
     status: Mapped[str] = mapped_column(String(60), index=True, nullable=False)
     format: Mapped[str] = mapped_column(String(40), default="json", nullable=False)
     correlation_id: Mapped[str | None] = mapped_column(String(120), index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
     created_by_user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"))
 
 

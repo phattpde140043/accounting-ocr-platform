@@ -1,4 +1,6 @@
-from sqlalchemy import ForeignKey, Integer, JSON, String, Text, UniqueConstraint
+from datetime import datetime
+
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -26,6 +28,14 @@ class FileAsset(IdMixin, TenantMixin, TimestampMixin, Base):
 
 class BackgroundJob(IdMixin, TenantMixin, TimestampMixin, Base):
     __tablename__ = "background_jobs"
+    __table_args__ = (
+        Index(
+            "ix_background_jobs_claimable",
+            "status",
+            "available_at",
+            "attempts",
+        ),
+    )
 
     job_type: Mapped[str] = mapped_column(String(120), index=True, nullable=False)
     status: Mapped[str] = mapped_column(String(60), index=True, nullable=False)
@@ -33,5 +43,9 @@ class BackgroundJob(IdMixin, TenantMixin, TimestampMixin, Base):
     resource_id: Mapped[str | None] = mapped_column(String(120), index=True)
     correlation_id: Mapped[str | None] = mapped_column(String(120), index=True)
     attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=4, nullable=False)
+    available_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    locked_by: Mapped[str | None] = mapped_column(String(120), index=True)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     payload: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     error_message: Mapped[str | None] = mapped_column(Text)

@@ -1,4 +1,5 @@
 from enum import StrEnum
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import HTTPException, status
@@ -48,6 +49,8 @@ class BackgroundJobService:
             resource_id=resource_id,
             correlation_id=correlation_id,
             attempts=0,
+            max_attempts=4,
+            available_at=datetime.now(timezone.utc),
             payload=payload or {},
         )
         await self.repository.add(job)
@@ -69,10 +72,22 @@ class BackgroundJobService:
         await self.session.commit()
         return job
 
+    async def get_for_resource(
+        self, organization_id: str, resource_type: str, resource_id: str
+    ) -> BackgroundJob | None:
+        return await self.repository.get_for_resource(
+            organization_id, resource_type, resource_id
+        )
+
     async def mark_processing(self, organization_id: str, job_id: str) -> BackgroundJob:
         job = await self._get_job(organization_id, job_id)
         job.status = BackgroundJobStatus.PROCESSING.value
         job.attempts += 1
+        await self.session.commit()
+        return job
+
+    async def claim_next(self, *, worker_id: str) -> BackgroundJob | None:
+        job = await self.repository.claim_next(worker_id=worker_id)
         await self.session.commit()
         return job
 
@@ -81,6 +96,8 @@ class BackgroundJobService:
     ) -> BackgroundJob:
         job = await self._get_job(organization_id, job_id)
         job.status = BackgroundJobStatus.COMPLETED.value
+        job.locked_by = None
+        job.locked_until = None
         await self.audit_log.record(
             AuditEventCreate(
                 organization_id=organization_id,
@@ -101,19 +118,40 @@ class BackgroundJobService:
         actor_user_id: str | None,
         job_id: str,
         error_message: str,
+        retryable: bool = True,
     ) -> BackgroundJob:
         job = await self._get_job(organization_id, job_id)
-        job.status = BackgroundJobStatus.FAILED.value
+        should_retry = retryable and job.attempts < job.max_attempts
+        job.status = (
+            BackgroundJobStatus.QUEUED.value
+            if should_retry
+            else BackgroundJobStatus.FAILED.value
+        )
+        job.available_at = (
+            datetime.now(timezone.utc) + retry_delay_for_attempt(job.attempts)
+            if should_retry
+            else None
+        )
+        job.locked_by = None
+        job.locked_until = None
         job.error_message = error_message
         await self.audit_log.record(
             AuditEventCreate(
                 organization_id=organization_id,
                 actor_user_id=actor_user_id,
-                action="background_job.failed",
+                action=(
+                    "background_job.retry_scheduled"
+                    if should_retry
+                    else "background_job.failed"
+                ),
                 resource_type="background_job",
                 resource_id=job.id,
                 correlation_id=job.correlation_id,
-                metadata={"error_message": error_message},
+                metadata={
+                    "error_type": error_message,
+                    "attempts": job.attempts,
+                    "max_attempts": job.max_attempts,
+                },
             )
         )
         await self.session.commit()
@@ -130,3 +168,9 @@ class BackgroundJobService:
                 },
             )
         return job
+
+
+def retry_delay_for_attempt(attempts: int) -> timedelta:
+    retry_seconds = (0, 60, 300, 1800)
+    index = min(max(attempts - 1, 0), len(retry_seconds) - 1)
+    return timedelta(seconds=retry_seconds[index])

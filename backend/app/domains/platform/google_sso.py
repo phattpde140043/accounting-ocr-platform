@@ -63,12 +63,12 @@ class GoogleAuthTokenVerifier:
         subject = payload.get("sub")
         email = payload.get("email")
         name = payload.get("name") or email
-        if not subject or not email:
+        if not subject or not email or payload.get("email_verified") is not True:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail={
                     "code": "invalid_google_profile",
-                    "message": "The Google ID token is missing required profile claims.",
+                    "message": "The Google ID token is missing required verified profile claims.",
                 },
             )
 
@@ -83,4 +83,6 @@ class GoogleAuthTokenVerifier:
 def get_google_token_verifier() -> GoogleTokenVerifier:
     if settings.google_token_verifier_mode == "google":
         return GoogleAuthTokenVerifier()
-    return DemoGoogleTokenVerifier()
+    if settings.google_token_verifier_mode == "demo" and settings.demo_auth_enabled:
+        return DemoGoogleTokenVerifier()
+    raise RuntimeError("Demo Google token verification is allowed only in local demo mode.")

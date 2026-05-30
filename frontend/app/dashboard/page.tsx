@@ -1,14 +1,16 @@
-import { metrics } from "../lib/demo-data";
+import { getDashboardMetrics } from "../lib/dashboard-api";
 
-export default function DashboardPage() {
+export default async function DashboardPage() {
+  const metrics = await getDashboardMetrics();
+
   return (
     <div className="stack">
       <section className="page-header">
         <div>
           <h2>Dashboard</h2>
           <p>
-            Role-specific metrics will be served by `/api/v1/dashboard/summary`.
-            This screen anchors the future admin, employee and customer dashboards.
+            Tenant-scoped operational signals for OCR throughput, review workload,
+            exports and audit activity.
           </p>
         </div>
       </section>
@@ -23,4 +25,3 @@ export default function DashboardPage() {
     </div>
   );
 }
-

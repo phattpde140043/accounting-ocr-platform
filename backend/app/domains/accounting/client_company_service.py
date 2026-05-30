@@ -13,8 +13,12 @@ class AccountingClientCompanyService:
         self.repository = AccountingClientCompanyRepository(session)
         self.audit_log = AuditLogService(session)
 
-    async def list_client_companies(self, organization_id: str) -> list[dict]:
-        companies = await self.repository.list_for_org(organization_id)
+    async def list_client_companies(
+        self, organization_id: str, *, limit: int = 50, offset: int = 0
+    ) -> list[dict]:
+        companies = await self.repository.list_for_org(
+            organization_id, limit=limit, offset=offset
+        )
         return [self._serialize(company) for company in companies]
 
     async def create_client_company(
@@ -52,4 +56,3 @@ class AccountingClientCompanyService:
             "tax_code": company.tax_code,
             "created_at": company.created_at.isoformat() if company.created_at else "",
         }
-

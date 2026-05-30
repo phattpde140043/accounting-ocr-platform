@@ -1,11 +1,15 @@
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.type !== "OPSBRIDGE_REGION_SELECTED") return;
 
-  chrome.storage.sync.get(["apiBaseUrl", "documentId"], async (values) => {
+  chrome.storage.local.get(["apiBaseUrl", "documentId", "accessToken"], async (values) => {
     const apiBaseUrl = values.apiBaseUrl || "http://localhost:8000/api/v1";
     const documentId = values.documentId;
     if (!documentId) {
       sendResponse({ ok: false, error: "Missing documentId" });
+      return;
+    }
+    if (!values.accessToken) {
+      sendResponse({ ok: false, error: "Missing access token" });
       return;
     }
 
@@ -16,9 +20,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            "X-Organization-Id": "org_demo",
-            "X-User-Id": "user_admin",
-            "X-Role": "admin"
+            "Authorization": `Bearer ${values.accessToken}`
           },
           body: JSON.stringify({ regions: [message.region] })
         }
@@ -31,4 +33,3 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   return true;
 });
-

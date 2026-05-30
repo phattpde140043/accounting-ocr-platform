@@ -71,9 +71,9 @@ class AccountingDocumentRepository(BaseRepository[AccountingDocument]):
         invoice_symbol: str,
         invoice_date: str,
         total_amount: str,
+        exclude_document_id: str | None = None,
     ) -> AccountingDocument | None:
-        return await self.session.scalar(
-            select(AccountingDocument).where(
+        statement = select(AccountingDocument).where(
                 AccountingDocument.organization_id == organization_id,
                 AccountingDocument.seller_tax_code == seller_tax_code,
                 AccountingDocument.invoice_number == invoice_number,
@@ -81,12 +81,44 @@ class AccountingDocumentRepository(BaseRepository[AccountingDocument]):
                 AccountingDocument.invoice_date == invoice_date,
                 AccountingDocument.total_amount == total_amount,
             )
+        if exclude_document_id:
+            statement = statement.where(AccountingDocument.id != exclude_document_id)
+        return await self.session.scalar(statement)
+
+    async def list_by_ids_for_org(
+        self, organization_id: str, document_ids: list[str]
+    ) -> list[AccountingDocument]:
+        if not document_ids:
+            return []
+        result = await self.session.scalars(
+            select(AccountingDocument).where(
+                AccountingDocument.organization_id == organization_id,
+                AccountingDocument.id.in_(document_ids),
+            )
         )
+        documents_by_id = {document.id: document for document in result.all()}
+        return [
+            documents_by_id[document_id]
+            for document_id in document_ids
+            if document_id in documents_by_id
+        ]
 
 
 class AccountingOcrJobRepository(BaseRepository[AccountingOcrJob]):
     def __init__(self, session: AsyncSession) -> None:
         super().__init__(session, AccountingOcrJob)
+
+    async def get_active_for_document_provider(
+        self, *, organization_id: str, document_id: str, provider: str
+    ) -> AccountingOcrJob | None:
+        return await self.session.scalar(
+            select(AccountingOcrJob).where(
+                AccountingOcrJob.organization_id == organization_id,
+                AccountingOcrJob.document_id == document_id,
+                AccountingOcrJob.provider == provider,
+                AccountingOcrJob.status.in_(("queued", "processing")),
+            )
+        )
 
 
 class AccountingOcrResultRepository(BaseRepository[AccountingOcrResult]):
@@ -128,6 +160,16 @@ class AccountingOcrFieldRepository(BaseRepository[AccountingOcrField]):
 class AccountingExportBatchRepository(BaseRepository[AccountingExportBatch]):
     def __init__(self, session: AsyncSession) -> None:
         super().__init__(session, AccountingExportBatch)
+
+    async def get_by_idempotency_key(
+        self, organization_id: str, idempotency_key: str
+    ) -> AccountingExportBatch | None:
+        return await self.session.scalar(
+            select(AccountingExportBatch).where(
+                AccountingExportBatch.organization_id == organization_id,
+                AccountingExportBatch.idempotency_key == idempotency_key,
+            )
+        )
 
 
 class AccountingExportItemRepository(BaseRepository[AccountingExportItem]):

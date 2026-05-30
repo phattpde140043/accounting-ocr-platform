@@ -1,3 +1,5 @@
+from hashlib import sha256
+
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,8 +17,13 @@ from app.domains.accounting.repositories import (
     AccountingExportItemRepository,
 )
 from app.domains.accounting.schemas import CreateExportBatchIn
-from app.domains.accounting.export_templates import normalize_export_template
+from app.domains.accounting.export_templates import (
+    ExportArtifact,
+    build_export_artifact,
+    normalize_export_template,
+)
 from app.domains.platform.audit_service import AuditEventCreate, AuditLogService
+from app.domains.platform.audit_catalog import DomainEvent
 
 
 class AccountingExportService:
@@ -35,17 +42,38 @@ class AccountingExportService:
         payload: CreateExportBatchIn,
     ) -> dict:
         export_template = normalize_export_template(payload.format)
-        documents = []
-        for document_id in payload.document_ids:
-            document = await self.documents.get_for_org(organization_id, document_id)
-            if document is None:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail={
-                        "code": "document_not_found",
-                        "message": "Accounting document was not found.",
-                    },
-                )
+        idempotency_key = build_export_idempotency_key(
+            document_ids=payload.document_ids,
+            export_format=export_template.value,
+            requested_key=payload.idempotency_key,
+        )
+        existing_batch = await self.batches.get_by_idempotency_key(
+            organization_id, idempotency_key
+        )
+        if existing_batch is not None:
+            existing_items = await self.items.list_for_batch(
+                organization_id, existing_batch.id
+            )
+            return {
+                "id": existing_batch.id,
+                "status": existing_batch.status,
+                "format": existing_batch.format,
+                "document_count": len(existing_items),
+            }
+
+        document_ids = list(dict.fromkeys(payload.document_ids))
+        documents = await self.documents.list_by_ids_for_org(
+            organization_id, document_ids
+        )
+        if len(documents) != len(document_ids):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "code": "document_not_found",
+                    "message": "One or more accounting documents were not found.",
+                },
+            )
+        for document in documents:
             if document.status != AccountingDocumentStatus.APPROVED.value:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -55,7 +83,6 @@ class AccountingExportService:
                         "document_id": document.id,
                     },
                 )
-            documents.append(document)
 
         batch = AccountingExportBatch(
             id=new_id("export"),
@@ -63,6 +90,7 @@ class AccountingExportService:
             status=AccountingExportBatchStatus.QUEUED.value,
             format=export_template.value,
             correlation_id=new_id("corr"),
+            idempotency_key=idempotency_key,
             created_by_user_id=actor_user_id,
         )
         await self.batches.add(batch)
@@ -89,12 +117,26 @@ class AccountingExportService:
             AuditEventCreate(
                 organization_id=organization_id,
                 actor_user_id=actor_user_id,
-                action="accounting.export_batch_created",
+                action=DomainEvent.EXPORT_BATCH_CREATED.value,
                 resource_type="accounting_export_batch",
                 resource_id=batch.id,
                 correlation_id=batch.correlation_id,
                 metadata={
-                    "document_ids": payload.document_ids,
+                    "document_count": len(documents),
+                    "format": export_template.value,
+                },
+            )
+        )
+        await self.audit_log.record(
+            AuditEventCreate(
+                organization_id=organization_id,
+                actor_user_id=actor_user_id,
+                action=DomainEvent.EXPORT_COMPLETED.value,
+                resource_type="accounting_export_batch",
+                resource_id=batch.id,
+                correlation_id=batch.correlation_id,
+                metadata={
+                    "document_count": len(documents),
                     "format": export_template.value,
                 },
             )
@@ -107,7 +149,9 @@ class AccountingExportService:
             "document_count": len(documents),
         }
 
-    async def download_export_batch(self, organization_id: str, batch_id: str) -> dict:
+    async def download_export_batch(
+        self, *, organization_id: str, actor_user_id: str, batch_id: str
+    ) -> ExportArtifact:
         batch = await self.batches.get_for_org(organization_id, batch_id)
         if batch is None:
             raise HTTPException(
@@ -118,26 +162,51 @@ class AccountingExportService:
                 },
             )
         items = await self.items.list_for_batch(organization_id, batch_id)
-        documents = []
-        for item in items:
-            document = await self.documents.get_for_org(organization_id, item.document_id)
-            if document is not None:
-                documents.append(
-                    {
-                        "id": document.id,
-                        "client_company_id": document.client_company_id,
-                        "document_type": document.document_type,
-                        "category": document.category,
-                        "accounting_period": document.accounting_period,
-                        "file_name": document.file_name,
-                        "status": document.status,
-                    }
-                )
-        return {
-            "batch_id": batch.id,
-            "format": batch.format,
-            "documents": documents,
-        }
+        documents = await self.documents.list_by_ids_for_org(
+            organization_id, [item.document_id for item in items]
+        )
+        if len(documents) != len(items):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "export_batch_incomplete",
+                    "message": "Export batch references unavailable documents.",
+                },
+            )
+
+        if batch.status == AccountingExportBatchStatus.COMPLETED.value:
+            self._ensure_export_batch_transition(
+                batch.status, AccountingExportBatchStatus.DOWNLOADED.value
+            )
+            batch.status = AccountingExportBatchStatus.DOWNLOADED.value
+        elif batch.status != AccountingExportBatchStatus.DOWNLOADED.value:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "export_batch_not_ready",
+                    "message": "Export batch is not ready for download.",
+                },
+            )
+
+        artifact = build_export_artifact(
+            normalize_export_template(batch.format), documents
+        )
+        await self.audit_log.record(
+            AuditEventCreate(
+                organization_id=organization_id,
+                actor_user_id=actor_user_id,
+                action=DomainEvent.EXPORT_DOWNLOADED.value,
+                resource_type="accounting_export_batch",
+                resource_id=batch.id,
+                correlation_id=batch.correlation_id,
+                metadata={
+                    "document_count": len(documents),
+                    "format": batch.format,
+                },
+            )
+        )
+        await self.session.commit()
+        return artifact
 
     def _ensure_document_transition(self, current_status: str, next_status: str) -> None:
         if can_document_transition(current_status, next_status):
@@ -166,3 +235,10 @@ class AccountingExportService:
                 "next_status": next_status,
             },
         )
+
+
+def build_export_idempotency_key(
+    *, document_ids: list[str], export_format: str, requested_key: str | None
+) -> str:
+    source = requested_key or f"{export_format}:{','.join(sorted(set(document_ids)))}"
+    return sha256(source.encode("utf-8")).hexdigest()

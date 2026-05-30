@@ -17,6 +17,7 @@ def test_ocr_result_contract_exposes_field_items_with_ids() -> None:
                 "value": "1250000",
                 "confidence": 0.86,
                 "source": "ocr",
+                "version": 1,
             }
         ],
     )

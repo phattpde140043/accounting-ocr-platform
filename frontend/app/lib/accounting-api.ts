@@ -1,5 +1,5 @@
 import { documents as fallbackDocuments } from "./demo-data";
-import { apiGet, apiPatch, apiPost, apiPostForm } from "./api-client";
+import { apiDownload, apiGet, apiPatch, apiPost, apiPostForm } from "./api-client";
 
 type ListResponse<T> = {
   items: T[];
@@ -55,6 +55,7 @@ export type OcrField = {
   value: string | null;
   confidence: number;
   source: string;
+  version: number;
 };
 
 export type OcrResult = {
@@ -64,12 +65,25 @@ export type OcrResult = {
   fields: Record<string, string | null>;
   field_items: OcrField[];
   confidence: number;
+  confidence_level: string;
+  review_route: string;
+  review_reasons: string[];
 };
 
 export type UpdateOcrFieldInput = {
   resultId: string;
   fieldId: string;
   value: string;
+  version: number;
+};
+
+export type ExportFormat = "json" | "misa" | "fast";
+
+export type ExportBatch = {
+  id: string;
+  status: string;
+  format: ExportFormat;
+  document_count: number;
 };
 
 function buildDocumentListPath(filters: AccountingDocumentListFilters = {}): string {
@@ -117,7 +131,8 @@ function normalizeOcrResult(result: OcrResult): OcrResult {
       key,
       value,
       confidence: result.confidence,
-      source: "ocr"
+      source: "ocr",
+      version: 1
     }))
   };
 }
@@ -160,10 +175,10 @@ export async function getOcrResult(documentId: string): Promise<OcrResult> {
 
 export async function updateOcrField(
   input: UpdateOcrFieldInput
-): Promise<{ status: string }> {
-  return apiPatch<{ status: string }>(
+): Promise<{ field_value: string; source: string; version: number }> {
+  return apiPatch<{ field_value: string; source: string; version: number }>(
     `/accounting/ocr-results/${input.resultId}/fields/${input.fieldId}`,
-    { value: input.value }
+    { value: input.value, version: input.version }
   );
 }
 
@@ -185,4 +200,20 @@ export async function uploadAccountingDocument(
   formData.append("category", input.category);
 
   return apiPostForm<AccountingDocument>("/accounting/documents/upload", formData);
+}
+
+export async function createExportBatch(
+  documentIds: string[],
+  format: ExportFormat
+): Promise<ExportBatch> {
+  return apiPost<ExportBatch>("/accounting/export-batches", {
+    document_ids: documentIds,
+    format
+  });
+}
+
+export async function downloadExportBatch(
+  batchId: string
+): Promise<{ blob: Blob; fileName: string }> {
+  return apiDownload(`/accounting/export-batches/${batchId}/download`);
 }

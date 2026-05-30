@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -18,6 +18,7 @@ from app.domains.platform.google_sso import (
     GoogleTokenVerifier,
     get_google_token_verifier,
 )
+from app.domains.platform.login_audit_service import LoginAuditService
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -36,11 +37,25 @@ async def get_google_login_metadata() -> GoogleLoginOut:
 @router.post("/google/callback", response_model=GoogleCallbackOut)
 async def handle_google_callback(
     payload: GoogleCallbackIn,
+    request: Request,
     verifier: Annotated[GoogleTokenVerifier, Depends(get_google_token_verifier)],
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> GoogleCallbackOut:
-    profile = await verifier.verify_id_token(payload.id_token)
-    principal = await AuthMembershipService(session).principal_from_google_profile(profile)
+    login_audit = LoginAuditService(session)
+    try:
+        profile = await verifier.verify_id_token(payload.id_token)
+        principal = await AuthMembershipService(session).principal_from_google_profile(profile)
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, dict) else {}
+        login_audit.record_rejection(reason=detail.get("code", "authentication_failed"))
+        raise
+
+    await login_audit.record_success(
+        organization_id=principal.organization_id,
+        user_id=principal.user_id,
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
     token_payload = issue_access_token(principal)
     return GoogleCallbackOut(
         profile=GoogleProfileOut(

@@ -6,3 +6,19 @@
   pointer-events: none;
 }
 
+.opsbridge-region-status {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 2147483647;
+  max-width: 320px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: #0b4f4a;
+  color: #ffffff;
+  font: 600 13px/1.4 system-ui, sans-serif;
+}
+
+.opsbridge-region-status[data-error="true"] {
+  background: #b42318;
+}

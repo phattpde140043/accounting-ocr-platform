@@ -23,17 +23,26 @@ X-User-Id: user_admin
 X-Role: admin
 ```
 
+Demo headers are local/test only:
+
+```bash
+ACCOUNTING_OCR_ENVIRONMENT=local
+ACCOUNTING_OCR_AUTH_MODE=demo
+```
+
 ## Google SSO
 
 ```bash
-GOOGLE_TOKEN_VERIFIER_MODE=demo
+ACCOUNTING_OCR_GOOGLE_TOKEN_VERIFIER_MODE=demo
 ```
 
 For production-like verification:
 
 ```bash
-GOOGLE_TOKEN_VERIFIER_MODE=google
-GOOGLE_CLIENT_ID=<your-google-client-id>
+ACCOUNTING_OCR_ENVIRONMENT=production
+ACCOUNTING_OCR_AUTH_MODE=google
+ACCOUNTING_OCR_GOOGLE_TOKEN_VERIFIER_MODE=google
+ACCOUNTING_OCR_GOOGLE_CLIENT_ID=<your-google-client-id>
 ```
 
 ## Database Bootstrap
@@ -62,5 +71,5 @@ python -m scripts.run_worker
 
 ```bash
 OPENAI_API_KEY=<your-api-key>
-OPENAI_OCR_MODEL=gpt-4.1-mini
+ACCOUNTING_OCR_OPENAI_OCR_MODEL=gpt-4.1-mini
 ```

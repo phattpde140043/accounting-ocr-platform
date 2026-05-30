@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.model_mixins import new_id
 from app.core.storage import StorageProvider, sanitize_filename, validate_upload
+from app.domains.shared.file_scan import FileScanner, get_file_scanner
 from app.domains.shared.models import FileAsset
 from app.domains.shared.repositories import FileAssetRepository
 
@@ -20,9 +21,15 @@ class FileUploadCreate:
 
 
 class FileService:
-    def __init__(self, session: AsyncSession, storage: StorageProvider) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        storage: StorageProvider,
+        scanner: FileScanner | None = None,
+    ) -> None:
         self.repository = FileAssetRepository(session)
         self.storage = storage
+        self.scanner = scanner or get_file_scanner()
 
     async def create_file_asset(self, payload: FileUploadCreate) -> FileAsset:
         size_bytes = len(payload.content)
@@ -50,19 +57,25 @@ class FileService:
         file_id = new_id("file")
         storage_key = f"{payload.organization_id}/{file_id}/{safe_name}"
         await self.storage.put_bytes(storage_key, payload.content)
-
-        asset = FileAsset(
-            id=file_id,
-            organization_id=payload.organization_id,
-            original_name=safe_name,
-            storage_key=storage_key,
-            mime_type=payload.mime_type,
-            size_bytes=size_bytes,
-            content_hash=content_hash,
-            status="stored",
-            created_by_user_id=payload.created_by_user_id,
-        )
-        return await self.repository.add(asset)
+        try:
+            scan_result = await self.scanner.scan(
+                content=payload.content, mime_type=payload.mime_type
+            )
+            asset = FileAsset(
+                id=file_id,
+                organization_id=payload.organization_id,
+                original_name=safe_name,
+                storage_key=storage_key,
+                mime_type=payload.mime_type,
+                size_bytes=size_bytes,
+                content_hash=content_hash,
+                status="stored" if scan_result.is_clean else "quarantined",
+                created_by_user_id=payload.created_by_user_id,
+            )
+            return await self.repository.add(asset)
+        except Exception:
+            await self.storage.delete(storage_key)
+            raise
 
 
 def compute_content_hash(content: bytes) -> str:

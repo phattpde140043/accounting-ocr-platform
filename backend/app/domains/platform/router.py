@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.context import RequestContext, get_request_context, require_roles
@@ -14,7 +14,7 @@ from app.domains.platform.schemas import (
     OrganizationOut,
     UserOut,
 )
-from app.domains.shared.schemas import ListResponse, StatusResponse
+from app.domains.shared.schemas import ListResponse, StatusResponse, build_offset_page_info
 
 router = APIRouter(tags=["platform"])
 
@@ -58,9 +58,19 @@ async def list_organizations(
 async def list_users(
     context: Annotated[RequestContext, Depends(require_roles("admin"))],
     session: Annotated[AsyncSession, Depends(get_db_session)],
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
 ) -> dict:
     service = AdminUserService(session)
-    return {"items": await service.list_users(context.organization_id)}
+    items = await service.list_users(
+        context.organization_id, limit=limit, offset=offset
+    )
+    return {
+        "items": items,
+        "page_info": build_offset_page_info(
+            item_count=len(items), limit=limit, offset=offset
+        ),
+    }
 
 
 @router.post("/admin/users", response_model=UserOut)
@@ -96,6 +106,16 @@ async def reset_user_password(
 async def list_audit_events(
     context: Annotated[RequestContext, Depends(require_roles("admin"))],
     session: Annotated[AsyncSession, Depends(get_db_session)],
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
 ) -> dict:
     service = AdminUserService(session)
-    return {"items": await service.list_audit_events(context.organization_id)}
+    items = await service.list_audit_events(
+        context.organization_id, limit=limit, offset=offset
+    )
+    return {
+        "items": items,
+        "page_info": build_offset_page_info(
+            item_count=len(items), limit=limit, offset=offset
+        ),
+    }

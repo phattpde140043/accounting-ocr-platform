@@ -12,24 +12,24 @@ database migrations, tests and architecture/planning documentation.
 The current codebase should be treated as a modular monolith MVP. It already has
 clear bounded contexts, tenant-scoped repositories, upload validation, OCR
 provider abstraction, lifecycle policies, field-level OCR result contracts,
-export templates, audit events and a reviewer queue UI shell. It is not yet a
-production-ready deployment because authentication is still demo-friendly,
-workers/storage are local, reviewer correction UI is incomplete, export artifact
-download is simplified, and some list/admin APIs still need stronger pagination
-and aggregate-query hardening.
+confidence routing, durable database job claiming, audited export downloads and
+an editable reviewer queue. It is not yet a production-ready deployment because
+storage and antivirus adapters remain local placeholders, workers still need
+external supervision, CI/E2E coverage is incomplete and extension packaging
+still needs deployment-origin review.
 
 ## 2. Requirement Mapping To Assignment Scope
 
 | Assignment Requirement | Architecture Feature | Current Source Evidence | Production Notes |
 | --- | --- | --- | --- |
-| Google SSO | Google SSO Authentication | `auth_router.py`, `google_sso.py`, `auth_membership_service.py` | Needs production fail-closed mode and strict Google client configuration. |
-| Admin authorization, history and statistics | Admin And Security Management, Dashboard And Operational Analytics | Platform admin router, audit service, dashboard domain | Audit/admin pagination and role-specific dashboard hardening remain open. |
-| Import PDF/JPG/PNG invoices | Accounting Document Intake | Multipart upload endpoint, storage validation, file service | Add antivirus scanning boundary before production. |
-| Select company, invoice type and category | Client Company Management, Document Metadata & Classification | `client_company_id`, `document_type`, `category`, `accounting_period` | Add richer metadata validation and controlled vocabularies. |
-| OCR invoice extraction | OCR Job Processing | OCR provider registry, OCR job/result/field models | Durable worker and provider timeout/retry policies remain open. |
-| OCR result review UI | Reviewer Queue And Field Correction | `/accounting/review`, OCR result DTO with field IDs | Complete field editing, approval action and correction history UI. |
-| Send data to accounting/business software | Export Batch Management | JSON, MISA-style CSV and FAST-style CSV serializers | Implement real artifact download or expiring storage reference. |
-| Chrome extension with bounding boxes | Region OCR Extension Workflow | `extension/chrome`, region OCR endpoint | Requires separate extension security review before release. |
+| Google SSO | Google SSO Authentication | `auth_router.py`, `google_sso.py`, `auth_membership_service.py` | Production mode fails closed; deployment still needs real Google configuration. |
+| Admin authorization, history and statistics | Admin And Security Management, Dashboard And Operational Analytics | Platform admin router, safe audit metadata boundary, aggregate dashboard domain | Add external metrics export and alerting. |
+| Import PDF/JPG/PNG invoices | Accounting Document Intake | Multipart upload endpoint, validation, scanner boundary, file service | Connect production AV and private object storage. |
+| Select company, invoice type and category | Client Company Management, Document Metadata & Classification | Controlled metadata policy for company, type, category and period | Extend vocabularies only when business rules require it. |
+| OCR invoice extraction | OCR Job Processing | Provider registry, confidence policy, leased background jobs and retry backoff | Run workers under external supervision. |
+| OCR result review UI | Reviewer Queue And Field Correction | `/accounting/review`, optimistic field save and approval | Render audit-backed correction history. |
+| Send data to accounting/business software | Export Batch Management | Idempotent JSON/MISA/FAST serializer and audited artifact download | Add stored artifacts for large batches. |
+| Chrome extension with bounding boxes | Region OCR Extension Workflow | Explicit active-page extension flow and bounded API endpoint | Package with deployed API-origin review. |
 
 ## 3. Current Source State
 
@@ -50,19 +50,21 @@ scripts/       Placeholder for project-level scripts
 - Frontend app: Next.js app router with pages for overview, dashboard,
   accounting intake, accounting review queue, AI and admin.
 - Database layer: SQLAlchemy async models and Alembic migrations.
-- Auth context: bearer JWT support plus demo header fallback.
+- Auth context: bearer JWT support plus demo header fallback restricted to
+  explicit local/test demo mode.
 - Tenant model: `organization_id` propagated through request context and
   repository filters.
-- Upload path: multipart upload with server-side size, MIME, extension and file
-  signature validation.
+- Upload path: multipart upload with server-side size, MIME, extension, file
+  signature validation and explicit scanner boundary.
 - File storage: local filesystem provider behind `StorageProvider`.
 - Duplicate detection: per-tenant file content hash support.
 - OCR: provider registry with mock and OpenAI-capable provider boundary.
-- Review contract: OCR result exposes both legacy `fields` and `field_items`
-  with stable field IDs.
-- Export: JSON, MISA-style CSV and FAST-style CSV template serializers.
-- Audit/traceability: audit events, HTTP trace ID middleware and correlation IDs
-  for OCR/background/export flows.
+- Review workflow: OCR result exposes stable field IDs, optimistic versions,
+  confidence routing, correction save state and approval UI.
+- Export: idempotent JSON, MISA-style CSV and FAST-style CSV artifact downloads
+  with batched document lookup.
+- Audit/traceability: canonical domain events, safe metadata validation, HTTP
+  trace ID middleware and correlation IDs for OCR/background/export flows.
 - Test suite: backend non-integration tests for lifecycle, contracts, upload
   validation, duplicate handling, correlation IDs, exports, permissions and
   platform boundaries.
@@ -1700,10 +1702,10 @@ Current responsibilities:
 
 Current limitations:
 
-- Background jobs are database records plus a local worker script, not a durable
-  distributed queue.
+- Background jobs are claimable database records plus a local worker script,
+  not an externally supervised queue deployment.
 - File storage is local filesystem only.
-- Background job idempotency metadata is not fully modeled yet.
+- Production scanner and object-storage implementations remain open.
 
 ### `app.domains.accounting`
 
@@ -1718,21 +1720,17 @@ Current responsibilities:
 - OCR result and field persistence.
 - OCR field update endpoint and audit event.
 - OCR result approval endpoint.
-- Export batch creation and simplified download.
+- Export batch creation and audited artifact download.
 - Export templates for `json`, `misa` and `fast`.
 - Region OCR endpoint.
 
 Current limitations:
 
-- OCR job execution is still exposed through an API endpoint and local worker
-  pattern; production should claim jobs from a durable queue.
-- Reviewer UI can inspect OCR fields but does not yet provide the complete
-  field editing/approval workbench.
-- Export creation currently loops through document IDs and download returns a
-  simplified JSON payload rather than a generated file response or stored
-  artifact reference.
-- Invoice identity fields exist on documents, but extraction-to-document
-  promotion and post-OCR duplicate policy are not fully implemented.
+- OCR job execution remains exposed through an API endpoint for local operation;
+  production should run workers under external supervision.
+- Reviewer correction history is audited but not yet rendered in the UI.
+- Export artifacts are generated on request; large batches may need stored
+  artifacts and expiring references.
 
 ### `app.domains.dashboard`
 
@@ -1753,28 +1751,27 @@ operational UI style.
 Current routes:
 
 - `/`: overview shell.
-- `/dashboard`: dashboard page.
-- `/accounting`: intake list and upload form.
+- `/dashboard`: tenant-scoped operational metric cards.
+- `/accounting`: intake list, upload form and approved-document export.
 - `/accounting/review`: review queue with client/period filters, selected
   document state and OCR field preview.
 - `/ai`: AI/OCR surface placeholder.
-- `/admin`: admin surface placeholder.
+- `/admin`: paginated recent audit event surface.
 
 Current API client behavior:
 
 - Uses `NEXT_PUBLIC_API_BASE_URL`, defaulting to `http://localhost:8000/api/v1`.
-- Sends demo headers by default for local development.
-- Supports `GET`, `POST`, `PATCH` and multipart form POST.
+- Sends a stored bearer token first; demo headers are local-development fallback.
+- Supports `GET`, `POST`, `PATCH`, multipart form POST and artifact download.
 - Has accounting helpers for document list filters, upload, review queue,
-  OCR result fetch, OCR field update and OCR result approval.
+  OCR result fetch, OCR field update, OCR result approval and export download.
 
 Current limitations:
 
-- API fetches do not yet use an explicit timeout or retry policy.
+- API fetches use a five-second timeout but do not yet retry automatically.
 - Review queue filtering is partly client-side after the initial
   `needs_review` server-side query.
-- Field correction and approval flows are implemented as API helpers but are not
-  fully wired into the review UI.
+- Correction history is audit-backed but is not rendered in the review UI.
 - No frontend unit/E2E test harness is present yet.
 
 ## 19. Chrome Extension Prototype
@@ -1788,9 +1785,11 @@ The `extension/chrome` directory contains a prototype Chrome extension with:
 
 Architectural status:
 
-- Prototype only.
-- Intended for future region OCR capture workflows.
-- Not yet treated as a production browser extension package.
+- Explicit active-page activation through `activeTab` and `scripting`.
+- Explicit `Alt` + drag gesture before a region request is sent.
+- Local bearer token storage and bounded region validation at client and API.
+- Permission review is documented in `extension/chrome/README.md`.
+- Production packaging and deployed API-origin review remain open.
 
 ## 20. Data Model And Migrations
 
@@ -1801,6 +1800,10 @@ Alembic migrations currently include:
   fields/indexes.
 - `0003_correlation_ids.py`: correlation IDs for jobs, audit events, OCR jobs
   and export batches.
+- `0004_query_budget_indexes.py`: query/index budget indexes.
+- `0005_idempotency_primitives.py`: OCR/export idempotency and field versions.
+- `0006_durable_worker_claiming.py`: worker lease, retry and availability fields.
+- `0007_ocr_confidence_routing.py`: persisted confidence review routing.
 
 Important model state:
 
@@ -1922,13 +1925,11 @@ Implemented controls:
 
 Known security gaps:
 
-- Demo header auth must be disabled or strictly environment-gated for
-  production.
 - Secrets are represented by local defaults and need production secret
   management.
 - CORS and deployment host restrictions are not documented as production-ready.
-- Audit/event payload classification is not fully formalized.
-- Admin audit list needs pagination and safe metadata review at scale.
+- Real antivirus integration must replace the production fail-closed scanner
+  placeholder.
 
 ## 24. Performance And Reliability State
 
@@ -1937,18 +1938,20 @@ Implemented controls:
 - Document list has bounded `limit` with server-side max of 100.
 - Common document filters are represented in model indexes.
 - Upload reading is chunked and rejects oversized payloads.
-- Background job records include attempts and status.
+- Background job records include atomic claiming, leases, attempts, availability
+  time and bounded retry backoff.
 - OCR provider lookup fails closed for unknown providers.
+- Export download uses tenant-scoped batch lookup instead of one query per row.
+- Dashboard signals use aggregate SQL and admin lists use bounded pagination.
+- Frontend API calls use a five-second timeout.
 
 Known performance/reliability gaps:
 
-- Export service currently fetches documents one by one.
-- Export artifacts are not stored or streamed as files yet.
-- Local worker is not durable and has no distributed locking/claiming strategy.
-- Frontend API calls need timeout handling to avoid SSR/client hangs when the
-  backend is unavailable.
-- Dashboard and admin list endpoints need continued aggregate-query and
-  pagination hardening.
+- Upload reads chunks but joins a bounded payload in memory before storage.
+- Worker claiming is durable in PostgreSQL, but execution still uses a local
+  worker process instead of externally managed queue infrastructure.
+- Export is streamed on request; large-volume stored artifacts with expiring
+  links remain a future optimization.
 
 ## 25. Observability State
 
@@ -1956,16 +1959,16 @@ Current:
 
 - HTTP trace ID middleware.
 - Structured request logging.
-- Audit events for document creation, status changes, OCR request/completion/
-  failure, field updates, exports, admin actions and background job changes.
+- Canonical domain events for document upload, OCR queue/completion/failure,
+  field correction, approval, export and region OCR actions.
+- Safe audit metadata validation rejects token, payload, row-content and raw
+  error-message keys.
 - Correlation ID columns on core async/audit entities.
 
 Target:
 
-- Standardize event catalog and metadata classification.
 - Include correlation IDs consistently in worker logs.
-- Add dashboard metrics for OCR queue depth, OCR failures, review workload,
-  export volume and audit volume.
+- Add external metrics export and alerting.
 
 ## 26. Testing State
 
@@ -1983,13 +1986,16 @@ Current backend tests cover:
 - Platform router DB-backed organization boundary.
 - Correlation ID contracts.
 - Database metadata contract as an integration-marked test.
+- Auth hardening, metadata classification, upload scanner boundary, pagination,
+  idempotency, durable claiming, confidence routing, export download, audit
+  metadata safety, dashboard aggregation and region OCR bounds.
 
 Latest known verification from this development session:
 
 ```bash
 cd backend
-python3 -m pytest app/tests -q -m 'not integration'
-# 36 passed, 1 deselected
+python3 -m pytest -q
+# 96 passed
 
 cd frontend
 npm run lint
@@ -2001,7 +2007,8 @@ Testing gaps:
 
 - No frontend unit test suite yet.
 - No Playwright/E2E coverage yet.
-- No full Docker Compose smoke test recorded in this architecture file.
+- Docker Compose smoke was attempted on May 31, 2026, but the local Docker
+  daemon was unavailable.
 - No production database migration test pipeline in repository CI, because CI
   workflow files could not be pushed with the current token scope.
 
@@ -2046,31 +2053,27 @@ Testing gaps:
 
 These are the current gates after reading the source state:
 
-- Production auth gate: disable or environment-gate demo header auth.
-- Durable worker gate: replace local worker path with a claimable durable queue
-  strategy before production OCR volume.
 - Object storage gate: add S3/MinIO provider and private object access policy.
-- Review UI gate: complete field editing, save states, approval action and
-  correction history UI.
-- Export gate: return real export artifacts or expiring download references;
-  avoid N+1 document fetches.
-- Pagination gate: add metadata and bounded pagination to admin/audit/client
-  list endpoints.
-- Frontend reliability gate: add fetch timeout/error handling for SSR and client
-  calls.
+- Antivirus gate: connect a production scanner implementation.
+- Worker operations gate: run the claimable worker under external supervision.
+- Review UI gate: render correction history from audit events.
+- Export scale gate: add stored artifacts and expiring links when batch volume
+  exceeds on-request generation budgets.
+- Extension gate: package and review deployed API origin permissions.
+- Region OCR provider gate: replace the bounded MVP extraction response with
+  the deployed provider adapter while retaining document context and audit.
 - CI gate: add workflow once repository token has `workflow` scope.
 
 ## 29. Production Readiness Roadmap
 
 Priority order for the remaining production-grade architecture gaps:
 
-1. Disable or strictly environment-gate demo header authentication.
-2. Add fail-closed production Google SSO mode with configured Google client ID.
-3. Introduce durable worker claiming for OCR jobs.
-4. Add private S3/MinIO-compatible object storage provider.
-5. Complete reviewer correction UI: edit, save, approve and correction history.
-6. Implement real export artifact generation/download with expiring references.
-7. Add pagination metadata for admin, audit and client-company lists.
-8. Add frontend fetch timeout, retry policy and backend-unavailable states.
-9. Add CI workflow once repository credentials include `workflow` scope.
-10. Add E2E smoke tests for upload -> OCR -> review -> approve -> export.
+1. Add private S3/MinIO-compatible object storage provider.
+2. Connect a production antivirus scanner implementation.
+3. Add externally supervised worker deployment and operational alerts.
+4. Render correction history in the reviewer UI.
+5. Add stored export artifacts with expiring references for large batches.
+6. Add CI workflow once repository credentials include `workflow` scope.
+7. Add E2E smoke tests for upload -> OCR -> review -> approve -> export.
+8. Package the extension with deployed API-origin permission review.
+9. Connect region OCR extraction to the deployed OCR provider adapter.

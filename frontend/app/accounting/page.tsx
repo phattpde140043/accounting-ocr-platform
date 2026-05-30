@@ -1,5 +1,6 @@
 import { getAccountingDocuments } from "../lib/accounting-api";
 import { CreateDocumentForm } from "./create-document-form";
+import { ExportPanel } from "./export-panel";
 
 export default async function AccountingPage() {
   const documents = await getAccountingDocuments();
@@ -41,6 +42,7 @@ export default async function AccountingPage() {
           </tbody>
         </table>
       </section>
+      <ExportPanel documents={documents} />
       <CreateDocumentForm />
     </div>
   );

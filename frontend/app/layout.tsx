@@ -7,7 +7,8 @@ const navItems = [
   { href: "/accounting", label: "Accounting" },
   { href: "/accounting/review", label: "Review Queue" },
   { href: "/ai", label: "AI" },
-  { href: "/admin", label: "Admin" }
+  { href: "/admin", label: "Admin" },
+  { href: "/auth/google/callback", label: "Sign in" }
 ];
 
 export default function RootLayout({ children }: { children: ReactNode }) {
