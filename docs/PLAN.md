@@ -617,5 +617,4 @@ handoff record.
   remains an external release check.
 - Passed: documentation sync for `.env.example`, Docker Compose, README files,
   API spec and architecture state.
-- Release implementation commit SHA: recorded after final implementation
-  commit.
+- Release implementation commit SHA: `22feeb0`.
